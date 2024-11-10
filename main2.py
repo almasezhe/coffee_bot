@@ -5,11 +5,10 @@ import asyncio
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters.command import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup,KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import aiogram
-from aiogram_inline_paginations import InlineKeyboardPaginator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,13 +83,11 @@ async def check_user_subscription(telegram_id):
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
-
 async def get_user_by_id(user_id):
     """Retrieve user information by user_id."""
     query = "SELECT * FROM users WHERE user_id = %s;"
     result = await db_execute(query, params=(user_id,), fetch=True)
     return result[0] if result else None
-
 async def get_user_latest_order(user_id):
     query = """
         SELECT o.order_id, o.status, o.otp_code, m.coffee_name
@@ -102,7 +99,6 @@ async def get_user_latest_order(user_id):
     """
     result = await db_execute(query, params=(user_id,), fetch=True)
     return result[0] if result else None
-
 async def display_users_credentials(message: types.Message):
     if not users_row:
         await message.answer("Данные пользователя не найдены.")
@@ -138,6 +134,30 @@ async def send_message_and_menu_buttons(message, reply_message, buttons_names):
     menu = ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
     await message.answer(reply_message, reply_markup=menu)
 
+
+### User Interaction ###
+
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    global users_row, is_cafe_chosen, is_coffee_chosen
+    is_cafe_chosen = False
+    is_coffee_chosen = False
+
+    telegram_id = message.from_user.id
+
+    users_row = await check_user_subscription(telegram_id)
+    if users_row:
+        await display_users_credentials(message)
+        await display_subscription_status(message)
+    else:
+        reply_message = "Нажмите «разрешить», чтобы мы зарегистрировали ваш текущий номер телефона."
+        menu = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Разрешить", request_contact=True)]],
+            resize_keyboard=True,
+        )
+        await message.answer(reply_message, reply_markup=menu)
+
 @dp.message(F.contact)
 async def register_and_display_data(message: types.Message):
     telegram_id = message.from_user.id
@@ -148,54 +168,94 @@ async def register_and_display_data(message: types.Message):
         ON CONFLICT (telegram_id) DO NOTHING;
     """
     await db_execute(query, params=(telegram_id, phone_number))
-    await start_command_handler(message)
+    await start(message)
 
 @dp.message(F.text == "Оформить заказ")
 async def handle_order_request(message: types.Message):
     global cafe_options
+    
+    telegram_id = message.from_user.id
+    user = await check_user_subscription(telegram_id)
+    
+    # Проверка подписки
+    if not user or not user["subscription_status"]:
+        await message.answer("У вас нет активной подписки. Для её приобретения напишите администратору.")
+        return
+    
+    # Проверка на лимит заказов
+    query = """
+        SELECT COUNT(*) AS daily_orders
+        FROM orders
+        JOIN users ON orders.user_id = users.user_id
+        WHERE users.telegram_id = %s AND DATE(orders.order_date) = CURRENT_DATE;
+    """
+    result = await db_execute(query, params=(str(telegram_id),), fetch=True)
+    daily_orders = result[0]["daily_orders"] if result else 0
+    
+    if daily_orders >= 1:
+        await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        return
+    
+    # Получение списка кафе
     cafe_options = await retrieve_cafe_options()
-
     if not cafe_options:
         await message.answer("К сожалению, сейчас нет доступных кафе.")
         return
 
-    await show_cafe_selection(message)
+    await show_cafe_selection(message, is_new=True)
 
 
-async def show_cafe_selection(message, page=1):
+
+async def show_cafe_selection(message, page=0, is_new=True):
     global cafe_options
     if not cafe_options:
         await message.answer("Нет доступных заведений.")
         return
 
     items_per_page = 4
-    paginator = InlineKeyboardPaginator(
-        len(cafe_options),
-        current_page=page,
-        data_pattern='cafe#{page}'
-    )
-
-    start_idx = (page - 1) * items_per_page
+    total_pages = (len(cafe_options) + items_per_page - 1) // items_per_page  # Вычисление общего числа страниц
+    start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(cafe_options))
-    cafes_page = cafe_options[start_idx:end_idx]
+    cafes_page = cafe_options[start_idx:end_idx]  # Выбираем только элементы текущей страницы
 
-    # Creating buttons for the cafes
-    for cafe in cafes_page:
-        paginator.add_after(InlineKeyboardButton(text=cafe['name'], callback_data=f"cafe_{cafe['cafe_id']}"))
+    # Кнопки для кафе
+    buttons = [
+        [InlineKeyboardButton(text=cafe["name"], callback_data=f"cafe_{cafe['cafe_id']}_{page}")]
+        for cafe in cafes_page
+    ]
 
-    await message.answer("Выберите кафе:", reply_markup=paginator.markup)
+    # Кнопки навигации
+    navigation_buttons = []
+    if page > 0:  # Если не первая страница, добавляем кнопку "<"
+        navigation_buttons.append(InlineKeyboardButton(text="<", callback_data=f"cafe_prev_{page - 1}"))
+    if page < total_pages - 1:  # Если не последняя страница, добавляем кнопку ">":
+        navigation_buttons.append(InlineKeyboardButton(text=">", callback_data=f"cafe_next_{page + 1}"))
+
+    if navigation_buttons:  # Добавляем навигационные кнопки только если они нужны
+        buttons.append(navigation_buttons)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if is_new:  # Если это новое сообщение, отправляем его
+        await message.answer("Выберите кафе:", reply_markup=keyboard)
+    else:  # Если сообщение уже есть, редактируем его
+        try:
+            await message.edit_text("Выберите кафе:", reply_markup=keyboard)
+        except aiogram.exceptions.TelegramBadRequest:
+            # Если сообщение нельзя отредактировать, отправляем новое
+            await message.answer("Выберите кафе:", reply_markup=keyboard)
 
 
-@dp.callback_query(lambda c: c.data.startswith("cafe#"))
-async def cafe_page_callback(callback_query: types.CallbackQuery):
-    page = int(callback_query.data.split("#")[1])
-    await show_cafe_selection(callback_query.message, page=page)
-    await callback_query.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("cafe_"))
 async def cafe_selected(callback_query: types.CallbackQuery):
     global coffee_options
-    cafe_id = int(callback_query.data.split("_")[1])
+    data = callback_query.data.split("_")
+    if data[1] in ["next", "prev"]:
+        await cafe_navigation(callback_query)
+        return
+
+    cafe_id, page = int(data[1]), int(data[2])
     coffee_options = await retrieve_menu(cafe_id)
 
     if not coffee_options:
@@ -204,37 +264,44 @@ async def cafe_selected(callback_query: types.CallbackQuery):
 
     await show_coffee_selection(callback_query.message, cafe_id)
 
-
-async def show_coffee_selection(message, cafe_id, page=1):
+async def show_coffee_selection(message, cafe_id, page=0):
     items_per_page = 4
-    paginator = InlineKeyboardPaginator(
-        len(coffee_options),
-        current_page=page,
-        data_pattern=f'coffee#{cafe_id}#{page}'
-    )
-
-    start_idx = (page - 1) * items_per_page
+    total_pages = (len(coffee_options) + items_per_page - 1) // items_per_page  # Вычисление общего числа страниц
+    start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(coffee_options))
-    coffee_page = coffee_options[start_idx:end_idx]
+    coffee_page = coffee_options[start_idx:end_idx]  # Выбираем только элементы текущей страницы
 
-    # Creating buttons for the coffees
+    # Кнопки для кофе
+    buttons = []
     for coffee in coffee_page:
         name = f"~{coffee['coffee_name']}~" if not coffee["is_available"] else coffee["coffee_name"]
-        paginator.add_after(InlineKeyboardButton(text=name, callback_data=f"coffee_{coffee['menu_id']}_{cafe_id}"))
+        buttons.append([InlineKeyboardButton(text=name, callback_data=f"coffee_{coffee['menu_id']}_{cafe_id}_{page}")])
 
-    await message.answer("Выберите кофе:", reply_markup=paginator.markup)
+    # Кнопки навигации
+    navigation_buttons = []
+    if page > 0:  # Если не первая страница, добавляем кнопку "<"
+        navigation_buttons.append(InlineKeyboardButton(text="<", callback_data=f"coffee_prev_{cafe_id}_{page - 1}"))
+    if page < total_pages - 1:  # Если не последняя страница, добавляем кнопку ">":
+        navigation_buttons.append(InlineKeyboardButton(text=">", callback_data=f"coffee_next_{cafe_id}_{page + 1}"))
 
+    if navigation_buttons:  # Добавляем навигационные кнопки только если они нужны
+        buttons.append(navigation_buttons)
 
-@dp.callback_query(lambda c: c.data.startswith("coffee#"))
-async def coffee_page_callback(callback_query: types.CallbackQuery):
-    cafe_id, page = map(int, callback_query.data.split("#")[1:])
-    await show_coffee_selection(callback_query.message, cafe_id, page=page)
-    await callback_query.answer()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if hasattr(message, 'reply_markup'):  # Если сообщение уже отправлено, редактируем его
+        await message.edit_text("Выберите кофе:", reply_markup=keyboard)
+    else:  # В противном случае отправляем новое сообщение
+        await message.answer("Выберите кофе:", reply_markup=keyboard)
+
 
 @dp.callback_query(lambda c: c.data.startswith("coffee_"))
 async def coffee_selected(callback_query: types.CallbackQuery):
     data = callback_query.data.split("_")
-    menu_id, cafe_id = int(data[1]), int(data[2])
+    if data[1] in ["next", "prev"]:
+        await coffee_navigation(callback_query)
+        return
+
+    menu_id, cafe_id, page = int(data[1]), int(data[2]), int(data[3])
 
     coffee = next((c for c in coffee_options if c["menu_id"] == menu_id), None)
     if not coffee:
@@ -254,7 +321,31 @@ async def coffee_selected(callback_query: types.CallbackQuery):
             chat_id=callback_query.from_user.id,
             text=f"Ваш заказ #{order_id} создан! Ожидайте готовности."
         )
+
+        asyncio.create_task(monitor_order_status(telegram_id))
         await callback_query.answer("Кофе добавлен в заказ!")
+
+
+@dp.callback_query(lambda c: c.data.startswith("coffee_next_") or c.data.startswith("coffee_prev_"))
+async def coffee_navigation(callback_query: types.CallbackQuery):
+    data = callback_query.data.split("_")
+    cafe_id, page = int(data[2]), int(data[3])
+    if "next" in data:
+        await show_coffee_selection(callback_query.message, cafe_id, page=page + 1)
+    elif "prev" in data:
+        await show_coffee_selection(callback_query.message, cafe_id, page=page - 1)
+    await callback_query.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("cafe_next_") or c.data.startswith("cafe_prev_"))
+async def cafe_navigation(callback_query: types.CallbackQuery):
+    data = callback_query.data.split("_")
+    page = int(data[-1])
+    if "next" in data:
+        await show_cafe_selection(callback_query.message, page=page + 1, is_new=False)
+    elif "prev" in data:
+        await show_cafe_selection(callback_query.message, page=page - 1, is_new=False)
+    await callback_query.answer()
+
 
 
 async def monitor_order_status(telegram_id):
@@ -300,6 +391,9 @@ async def monitor_order_status(telegram_id):
     except Exception as e:
         logger.error(f"Ошибка в monitor_order_status: {e}")
 
+
+
+
 async def monitor_otp_updates():
     """Проверка базы данных на обновления OTP-кодов и уведомление пользователей."""
     while True:
@@ -331,6 +425,7 @@ async def monitor_otp_updates():
         # Ждём 1 секунду перед следующей проверкой
         await asyncio.sleep(1)
 
+
 async def main():
     global db_connection
     db_connection = psycopg2.connect(DB_URL)
@@ -342,6 +437,8 @@ async def main():
     await dp.start_polling(bot)
 
     db_connection.close()
+
+
 
 if __name__ == "__main__":
     asyncio.run(main())
