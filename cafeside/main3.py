@@ -516,7 +516,7 @@ async def update_order_otp(order_id, otp_code):
 async def get_order_by_id(order_id):
     """Retrieve order details by ID."""
     query = """
-        SELECT o.order_id, o.user_id, o.menu_id, o.order_date, o.status, o.otp_code, m.coffee_name
+        SELECT o.order_id, o.user_id, o.menu_id, o.order_date, o.status, o.otp_code, o.details, m.coffee_name
         FROM orders o
         JOIN menu m ON o.menu_id = m.menu_id
         WHERE o.order_id = %s;
@@ -536,11 +536,12 @@ async def auto_push_new_orders():
 
     while True:
         try:
-            # Get pending orders for all cafes
+            # Get pending orders for all cafes along with username from users
             query = """
-                SELECT o.order_id, o.user_id, m.coffee_name, o.cafe_id, o.status
+                SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details
                 FROM orders o
                 JOIN menu m ON o.menu_id = m.menu_id
+                JOIN users u ON o.user_id = u.user_id
                 WHERE o.status = 'pending';
             """
             orders = await db_execute(query, fetch=True)
@@ -555,9 +556,10 @@ async def auto_push_new_orders():
 
                     message_text = (
                         f"🆕 Новый заказ #{order['order_id']}:\n"
-                        f"Клиент: {order['user_id']}\n"
+                        f"Клиент: @{order['username']}\n"  # Используем username
                         f"Напиток: {order['coffee_name']}\n"
-                        f"Статус: {order['status']}"
+                        f"Статус: {order['status']}\n"
+                        f"Детали заказа: {order['details']}"
                     )
                     buttons = [
                         [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
@@ -576,6 +578,7 @@ async def auto_push_new_orders():
             logger.error(f"Error in auto_push_new_orders: {e}")
 
         await asyncio.sleep(4)  # Wait before checking for new orders again
+
 
 async def get_admin_contact(cafe_id):
     """Retrieve the admin's Telegram ID for a given cafe."""
