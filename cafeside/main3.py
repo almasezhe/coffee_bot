@@ -11,6 +11,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeybo
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import re
+from aiogram import Router, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.filters import Command
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,8 @@ dp = Dispatcher()
 
 db_connection = None
 cafe_id = 6  # Replace with the actual cafe ID
-
+router = Router()
+dp.include_router(router)
 
 async def db_execute(query, params=None, fetch=False):
     """Helper function to execute a query on the database."""
@@ -73,7 +77,7 @@ async def add_menu_item(name, is_available=True):
 
 ### COMMAND HANDLERS ###
 
-@dp.message(Command("start"))
+@router.message(Command("start"))
 async def start(message: types.Message):
     global cafe_id
     # Fetch the cafe ID associated with this admin
@@ -86,18 +90,24 @@ async def start(message: types.Message):
         await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
         return
 
+    # Extract the cafe_id from the query result
     cafe_id = result[0]["cafe_id"]
+
+    # Create inline keyboard
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Меню", callback_data="menu")],
+        [InlineKeyboardButton(text="Заказы", callback_data="orders")]
+    ])
+
     await message.answer(
-        "Добро пожаловать в кафе-бот! Вы можете управлять своим меню.\n"
-        "Используйте команду /menu для просмотра и управления меню.\n"
-        "Используйте команду /add для добавления нового напитка."
+        "Добро пожаловать в кафе-бот! Вы можете управлять своим меню.",
+        reply_markup=keyboard
     )
 
 
-@dp.message(Command("menu"))
-async def show_menu(message: types.Message, page: int = 0):
-    """Display the cafe menu with pagination and interactive buttons."""
-    await render_menu(message, page)
+@router.callback_query(F.data == "menu")
+async def show_menu_callback(callback_query: CallbackQuery):
+    await render_menu(callback_query.message, page=0)
 
 
 async def render_menu(message_or_callback, page: int = 0):
@@ -133,7 +143,12 @@ async def render_menu(message_or_callback, page: int = 0):
                 callback_data=f"delete_confirm_{item['menu_id']}_{page}"
             )
         ])
-
+    buttons.append([
+        InlineKeyboardButton(
+            text="Добавить напиток",
+            callback_data="add"
+        )
+    ])
     # Add navigation buttons
     navigation_buttons = []
     if page > 0:
@@ -151,14 +166,13 @@ async def render_menu(message_or_callback, page: int = 0):
         await message_or_callback.message.edit_text("Here is your menu:", reply_markup=keyboard)
 
 
-@dp.message(Command("add"))
-async def add_item(message: types.Message, state: FSMContext):
-    """Start the process of adding a menu item."""
-    await message.answer("Введите название нового напитка.")
+@router.callback_query(F.data == "add")
+async def add_item_callback(callback_query: CallbackQuery, state: FSMContext):
+    await callback_query.message.answer("Введите название нового напитка.")
     await state.set_state(MenuState.waiting_for_new_item)
 
 
-@dp.message(MenuState.waiting_for_new_item)
+@router.message(MenuState.waiting_for_new_item)
 async def handle_new_menu_item(message: types.Message, state: FSMContext):
     """Handle adding the menu item after receiving the name."""
     coffee_name = message.text.strip()
@@ -171,8 +185,74 @@ async def handle_new_menu_item(message: types.Message, state: FSMContext):
     await message.answer(f"Напиток '{coffee_name}' добавлен в меню.")
     await state.clear()
 
+@router.callback_query(F.data.startswith("client_cancel_"))
+async def client_cancel_order(callback_query: CallbackQuery):
+    """Handle client order cancellation."""
+    order_id = int(callback_query.data.split("_")[2])
 
-@dp.callback_query(F.data.startswith("toggle_"))
+    # Update the order status to 'canceled'
+    await update_order_status(order_id, "canceled")
+
+    # Получаем контакт для уведомления (последний чат или личный ID)
+    admin_contact = await get_admin_contact(cafe_id)
+    if not admin_contact:
+        logger.error(f"Не удалось найти контакт администратора для cafe_id {cafe_id}.")
+        return
+
+    # Retrieve order details
+    order_details = await get_order_by_id(order_id)
+    if not order_details:
+        logger.error(f"Заказ с ID {order_id} не найден.")
+        return
+
+    # Send notification
+    await bot.send_message(
+        chat_id=admin_contact,
+        text=(
+            f"❌ Клиент отменил заказ №{order_id}.\n"
+            f"Клиент: {order_details['user_id']}\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Дата заказа: {order_details['order_date']}"
+        )
+    )
+
+    # Notify the client about the successful cancellation
+    await callback_query.message.edit_text("Вы успешно отменили заказ.")
+    await callback_query.answer("Ваш заказ отменён.")
+
+
+
+async def monitor_order_status():
+    """Monitor the database for cancelled orders and notify admins."""
+    notified_orders = set()
+
+    while True:
+        query = """
+            SELECT order_id, user_id, menu_id, order_date
+            FROM orders
+            WHERE cafe_id = %s AND status = 'canceled';
+        """
+        cancelled_orders = await db_execute(query, params=(cafe_id,), fetch=True)
+
+        for order in cancelled_orders:
+            if order["order_id"] not in notified_orders:
+                notified_orders.add(order["order_id"])  # Чтобы не отправлять уведомление повторно
+
+                admin_contact = await get_admin_contact(cafe_id)
+                if admin_contact:
+                    await bot.send_message(
+                        chat_id=admin_contact,
+                        text=(
+                            f"❌ Заказ #{order['order_id']} был отменён.\n"
+                            f"Клиент: {order['user_id']}\n"
+                            f"Дата заказа: {order['order_date']}"
+                        )
+                    )
+
+        await asyncio.sleep(4)  # Проверять каждые 4 секунды
+
+
+@router.callback_query(F.data.startswith("toggle_"))
 async def toggle_availability(callback_query: types.CallbackQuery):
     """Toggle the availability of a menu item."""
     data_parts = callback_query.data.split("_")
@@ -192,7 +272,7 @@ async def toggle_availability(callback_query: types.CallbackQuery):
     await callback_query.answer("Статус обновлен.")
 
 
-@dp.callback_query(F.data.startswith("delete_confirm_"))
+@router.callback_query(F.data.startswith("delete_confirm_"))
 async def confirm_delete(callback_query: types.CallbackQuery):
     """Ask for confirmation before deleting a menu item."""
     data_parts = callback_query.data.split("_")
@@ -222,7 +302,7 @@ async def confirm_delete(callback_query: types.CallbackQuery):
     )
 
 
-@dp.callback_query(F.data.startswith("delete_"))
+@router.callback_query(F.data.startswith("delete_"))
 async def delete_item(callback_query: types.CallbackQuery):
     """Delete a menu item after confirmation."""
     data_parts = callback_query.data.split("_")
@@ -234,14 +314,14 @@ async def delete_item(callback_query: types.CallbackQuery):
     await callback_query.answer("Напиток удален.")
 
 
-@dp.callback_query(F.data.startswith("cancel_delete_"))
+@router.callback_query(F.data.startswith("cancel_delete_"))
 async def cancel_delete(callback_query: types.CallbackQuery):
     """Cancel the deletion process."""
     page = int(callback_query.data.split("_")[2])
     await render_menu(callback_query, page=page)
     await callback_query.answer("Удаление отменено.")
 
-@dp.callback_query(lambda c: c.data.startswith("prev_page_"))
+@router.callback_query(lambda c: c.data.startswith("prev_page_"))
 async def previous_page(callback_query: types.CallbackQuery):
     """Go to the previous page."""
     page = int(callback_query.data.split("_")[2])
@@ -249,7 +329,7 @@ async def previous_page(callback_query: types.CallbackQuery):
     await callback_query.answer()  # Acknowledge the callback
 
 
-@dp.callback_query(lambda c: c.data.startswith("next_page_"))
+@router.callback_query(lambda c: c.data.startswith("next_page_"))
 async def next_page(callback_query: types.CallbackQuery):
     """Go to the next page."""
     page = int(callback_query.data.split("_")[2])
@@ -270,28 +350,38 @@ async def get_incoming_orders():
 
 async def update_order_status(order_id, status):
     """Update the status of an order."""
+    # Проверяем текущий статус заказа
+    query = "SELECT status FROM orders WHERE order_id = %s;"
+    result = await db_execute(query, params=(order_id,), fetch=True)
+    
+    if not result:
+        logger.warning(f"Заказ с ID {order_id} не найден.")
+        return False  # Заказ не найден
+
+    if result[0]['status'] == 'canceled':
+        logger.warning(f"Попытка изменить статус отменённого заказа #{order_id}")
+        return False  # Запрещаем изменение статуса
+
+    # Обновляем статус, если заказ не отменён
     query = "UPDATE orders SET status = %s WHERE order_id = %s;"
     await db_execute(query, params=(status, order_id))
+    return True
 
 
-@dp.message(Command("orders"))
-async def show_orders(message: types.Message):
-    """Display incoming orders."""
+
+@router.callback_query(F.data == "orders")
+async def show_orders_callback(callback_query: CallbackQuery):
     orders = await get_incoming_orders()
 
     if not orders:
-        await message.answer("Нет новых заказов.")
+        await callback_query.message.answer("Нет новых заказов.")
         return
 
     for order in orders:
         # If the order is pending, show only the "Принять" button
         if order["status"] == "pending":
             buttons = [[InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]]
-        # If the order is accepted, show only the "Готово" button
-        else:
-            # Skip completed or invalid status orders
-            continue
-        if order["status"] == "готовится":
+        elif order["status"] == "готовится":
             buttons = [[InlineKeyboardButton(text="Готово", callback_data=f"done_{order['order_id']}")]]
         else:
             # Skip completed or invalid status orders
@@ -299,10 +389,10 @@ async def show_orders(message: types.Message):
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        await message.answer(
+        await callback_query.message.answer(
             f"Заказ №{order['order_id']}:\n"
             f"Клиент: {order['user_id']}\n"
-            f"Напиток: {order['coffee_name']}\n"  # Use coffee_name here
+            f"Напиток: {order['coffee_name']}\n"
             f"Статус: {order['status']}",
             reply_markup=keyboard,
         )
@@ -314,27 +404,34 @@ async def get_user_by_id(user_id):
     return result[0] if result else None
 
 
-@dp.callback_query(F.data.startswith("accept_"))
+@router.callback_query(F.data.startswith("accept_"))
 async def accept_order(callback_query: types.CallbackQuery):
     """Handle accepting an order."""
     order_id = int(callback_query.data.split("_")[1])
-    await update_order_status(order_id, "готовится")
 
-    # Edit the message to show the new status and the "Готово" button
+    # Попытка обновить статус на "готовится"
+    success = await update_order_status(order_id, "готовится")
+    if not success:
+        await callback_query.answer("Нельзя изменить статус отменённого или несуществующего заказа.", show_alert=True)
+        return
+
+    # Если статус успешно обновлён, обновляем сообщение и добавляем кнопку "Готово"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Готово", callback_data=f"done_{order_id}")]
         ]
     )
     await callback_query.message.edit_text(
-        f"Заказ №{order_id} принят. Статус обновлен на 'готовится'.",
+        f"Заказ №{order_id} принят. Статус обновлён на 'готовится'.",
         reply_markup=keyboard,
     )
     await callback_query.answer("Заказ принят.")
 
 
 
-@dp.callback_query(F.data.startswith("done_"))
+
+
+@router.callback_query(F.data.startswith("done_"))
 async def complete_order(callback_query: types.CallbackQuery):
     """Handle completing an order."""
     try:
@@ -379,7 +476,7 @@ async def get_order_by_id(order_id):
     result = await db_execute(query, params=(order_id,), fetch=True)
     return result[0] if result else None
 
-@dp.callback_query(F.data.startswith("generate_"))
+@router.callback_query(F.data.startswith("generate_"))
 async def generate_otp_code(callback_query: types.CallbackQuery):
     """Generate and send the OTP code for the order."""
     order_id = int(callback_query.data.split("_")[1])
@@ -415,58 +512,73 @@ async def get_order_by_id(order_id):
     """
     result = await db_execute(query, params=(order_id,), fetch=True)
     return result[0] if result else None
+async def send_notification(chat_or_user_id, message_text):
+    """Send a notification to a chat or user."""
+    try:
+        await bot.send_message(chat_id=chat_or_user_id, text=message_text)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления: {e}")
 
 async def auto_push_new_orders():
-    """Continuously check for new orders and push them to the cafe admin."""
-    already_sent_orders = set()
-
-    # Fetch the admin's Telegram ID for the current cafe
-    admin_telegram_id = await get_admin_telegram_id(cafe_id)
-    if not admin_telegram_id:
-        logger.error("Не найден admin_telegram_id для cafe_id %s", cafe_id)
-        return
+    """Continuously check for new orders and notify the cafe."""
+    already_notified = set()
 
     while True:
-        # Fetch pending orders
-        orders = await get_incoming_orders()
-        for order in orders:
-            if order["order_id"] not in already_sent_orders:
-                # Mark the order as sent
-                already_sent_orders.add(order["order_id"])
+        try:
+            # Get pending orders for all cafes
+            query = """
+                SELECT o.order_id, o.user_id, m.coffee_name, o.cafe_id, o.status
+                FROM orders o
+                JOIN menu m ON o.menu_id = m.menu_id
+                WHERE o.status = 'pending';
+            """
+            orders = await db_execute(query, fetch=True)
+            
+            for order in orders:
+                if order["order_id"] not in already_notified:
+                    already_notified.add(order["order_id"])
+                    cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                # Send the order to the admin
-                buttons = [
-                    [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
-                ]
-                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-                await bot.send_message(
-                    chat_id=admin_telegram_id,  # Use the admin's Telegram ID
-                    text=(
-                        f"Новый заказ #{order['order_id']}:\n"
-                        f"Клиент: {order['user_id']}\n"
-                        f"Напиток: {order['coffee_name']}\n"
-                        f"Статус: {order['status']}"
-                    ),
-                    reply_markup=keyboard,
-                )
+                    if cafe_chat_id:
+                        buttons = [
+                            [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
+                        ]
+                        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+                        await send_notification(
+                            chat_id=cafe_chat_id,
+                            message_text=(
+                                f"Новый заказ #{order['order_id']}:\n"
+                                f"Клиент: {order['user_id']}\n"
+                                f"Напиток: {order['coffee_name']}\n"
+                                f"Статус: {order['status']}"
+                            ),
+                            reply_markup=keyboard
+                        )
+        except Exception as e:
+            logger.error(f"Error in auto_push_new_orders: {e}")
 
-        # Wait for a few seconds before checking again
-        await asyncio.sleep(5)
-
-
-async def get_admin_telegram_id(cafe_id):
-    """Retrieve the telegram_id of the admin for the given cafe."""
+        await asyncio.sleep(4)  # Wait before checking for new orders again
+async def get_admin_contact(cafe_id):
+    """Retrieve the last chat_id or telegram_id for notifications."""
     query = "SELECT telegram_id FROM admins WHERE cafe_id = %s LIMIT 1;"
     result = await db_execute(query, params=(cafe_id,), fetch=True)
-    return result[0]["telegram_id"] if result else None
+    if result:
+        return result[0]["telegram_id"]
+    return None
 
-@dp.message()
-async def default_message_handler(message: types.Message):
-    """Handle other messages that don't match any commands or states."""
-    await message.answer(
-        "Неизвестная команда или сообщение. Используйте /menu, /add, /delete или /orders."
-    )
 
+async def get_cafe_chat_id(cafe_id):
+    """Retrieve the chat_id for the cafe."""
+    query = "SELECT chat_id FROM cafes WHERE cafe_id = %s;"
+    result = await db_execute(query, params=(cafe_id,), fetch=True)
+    return result[0]["chat_id"] if result else None
+
+async def send_notification(chat_id, message_text):
+    """Send a notification to a specific chat_id."""
+    try:
+        await bot.send_message(chat_id=chat_id, text=message_text)
+    except Exception as e:
+        logger.error(f"Error sending notification: {e}")
 
 ### MAIN ###
 
@@ -474,12 +586,14 @@ async def main():
     global db_connection
     db_connection = psycopg2.connect(DB_URL)
 
-    # Start the bot and the auto-push task
+    # Запускаем мониторинг заказов
+    asyncio.create_task(monitor_order_status())
     asyncio.create_task(auto_push_new_orders())
     logger.info("Бот для кафе запущен и готов к работе")
     await dp.start_polling(bot)
 
     db_connection.close()
+
 
 
 

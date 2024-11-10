@@ -227,20 +227,14 @@ async def handle_phone_number(message: types.Message):
     query = "UPDATE users SET phone_number = %s WHERE telegram_id = %s;"
     await db_execute(query, params=(phone_number, str(telegram_id)))
 
-    # Создаем инлайн-кнопку для оформления заказа
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить заказ", callback_data="order")]
-    ])
-    await message.answer("Ваш номер телефона успешно сохранён! Теперь вы можете оформить заказ.", reply_markup=keyboard)
+    await message.answer("Ваш номер телефона успешно сохранён! Теперь вы можете оформить заказ.")
+    await handle_order_request(message)  # Перезапускаем процесс оформления заказа
 
 
 @dp.message(F.text == "❌ Отказаться")
 async def handle_decline_phone_request(message: types.Message):
     """Обрабатываем отказ от предоставления номера телефона."""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить заказ", callback_data="order")]
-    ])
-    await message.answer("Вы отказались предоставить номер телефона. Вы можете оформить заказ без него.", reply_markup=keyboard)
+    await message.answer("Вы отказались предоставить номер телефона. Вы можете оформить заказ без него.")
 
 
 
@@ -496,6 +490,9 @@ async def monitor_order_status(telegram_id):
                 break
     except Exception as e:
         logger.error(f"Ошибка в monitor_order_status: {e}")
+
+
+
 
 async def monitor_otp_updates():
     """Проверка базы данных на обновления OTP-кодов и уведомление пользователей."""
