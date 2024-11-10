@@ -26,7 +26,7 @@ cafe_options = None
 coffee_options = None
 is_cafe_chosen = False
 is_coffee_chosen = False
-
+user_data = {}
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
@@ -356,12 +356,8 @@ async def navigate_coffee_pages(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("coffee_"))
 async def handle_coffee_selection(callback_query: types.CallbackQuery):
-    """Обработка выбора кофе и создание заказа."""
+    """Обработка выбора кофе с возможностью добавления комментария."""
     try:
-        # Убедимся, что это не пагинация
-        if "page" in callback_query.data:
-            return
-
         data = callback_query.data.split("_")
         menu_id = int(data[1])  # ID выбранного кофе
         cafe_id = int(data[2])  # ID кафе, к которому принадлежит кофе
@@ -376,32 +372,117 @@ async def handle_coffee_selection(callback_query: types.CallbackQuery):
             await callback_query.answer("Извините, этот кофе временно недоступен.", show_alert=True)
             return
 
-        # Создание заказа
+        # Сохранить выбор кофе для текущего пользователя
         telegram_id = callback_query.from_user.id
-        order = await create_order(telegram_id, cafe_id, menu_id)
+        user_data[telegram_id] = {"cafe_id": cafe_id, "menu_id": menu_id}
 
-        if order:
-            order_id = order[0]["order_id"]
-
-            # Создаем клавиатуру с кнопкой "Отменить"
-            cancel_keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_order_{order_id}")]
-                ]
-            )
-
-            await callback_query.message.edit_text(
-                f"Ваш заказ #{order_id} на {selected_coffee['coffee_name']} создан. Ожидайте подтверждения.",
-                reply_markup=cancel_keyboard
-            )
-
-            # Запуск мониторинга статуса заказа
-            asyncio.create_task(monitor_order_status(telegram_id))
-        else:
-            await callback_query.answer("Произошла ошибка при создании заказа. Попробуйте позже.", show_alert=True)
-    except (IndexError, ValueError) as e:
+        # Запросить комментарий к заказу
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Да", callback_data="add_comment_yes")],
+                [InlineKeyboardButton(text="Нет", callback_data="add_comment_no")]
+            ]
+        )
+        await callback_query.message.edit_text(
+            f"Вы выбрали {selected_coffee['coffee_name']}. Хотите добавить комментарии к заказу? (например, сироп, сахар и т.д.)",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+    except Exception as e:
         logger.error(f"Ошибка обработки выбора кофе: {e}")
-        await callback_query.answer("Неверный формат данных. Попробуйте снова.", show_alert=True)
+        await callback_query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+
+
+@dp.callback_query(F.data == "add_comment_yes")
+async def handle_add_comment_yes(callback_query: types.CallbackQuery):
+    """Запросить детали заказа у пользователя."""
+    telegram_id = callback_query.from_user.id
+    await callback_query.message.answer("Пожалуйста, отправьте сообщение с комментариями к вашему заказу (например, добавить сироп, сахар и т.д.).",reply_markup=None)
+    user_data[telegram_id]["awaiting_comment"] = True  # Установить флаг ожидания комментария
+    await callback_query.answer()
+
+
+@dp.callback_query(F.data == "add_comment_no")
+async def handle_add_comment_no(callback_query: types.CallbackQuery):
+    """Создать заказ без комментариев."""
+    telegram_id = callback_query.from_user.id
+    order_data = user_data.get(telegram_id, {})
+    
+    if not order_data:
+        await callback_query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+        return
+
+    # Создать заказ без деталей
+    order = await create_order(telegram_id, order_data["cafe_id"], order_data["menu_id"])
+    if order:
+        order_id = order[0]["order_id"]
+        
+        # Создаем клавиатуру с кнопкой "Отменить"
+        cancel_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
+            ]
+        )
+
+        await callback_query.message.answer(
+            f"Ваш заказ #{order_id} успешно создан! Если хотите отменить, нажмите кнопку ниже.",
+            reply_markup=cancel_keyboard
+        )
+    else:
+        await callback_query.answer("Произошла ошибка при создании заказа.", show_alert=True)
+
+
+@dp.message(lambda message: user_data.get(message.from_user.id, {}).get("awaiting_comment"))
+async def handle_order_comment(message: types.Message):
+    """Обработать комментарий пользователя и создать заказ."""
+    telegram_id = message.from_user.id
+    order_data = user_data.get(telegram_id, {})
+
+    if not order_data:
+        await message.answer("Произошла ошибка. Попробуйте снова.")
+        return
+
+    # Создать заказ с деталями
+    comment = message.text
+    order = await create_order_with_details(telegram_id, order_data["cafe_id"], order_data["menu_id"], comment)
+    if order:
+        order_id = order[0]["order_id"]
+        
+        # Создаем клавиатуру с кнопкой "Отменить"
+        cancel_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
+            ]
+        )
+
+        await message.answer(
+            f"Ваш заказ #{order_id} успешно создан с комментариями: {comment}. Если хотите отменить, нажмите кнопку ниже.",
+            reply_markup=cancel_keyboard
+        )
+    else:
+        await message.answer("Произошла ошибка при создании заказа.")
+    
+    # Очистить данные пользователя
+    user_data.pop(telegram_id, None)
+
+
+async def create_order_with_details(telegram_id, cafe_id, menu_id, details):
+    """Создание заказа с комментариями."""
+    query_get_user_id = "SELECT user_id FROM users WHERE telegram_id = %s;"
+    user = await db_execute(query_get_user_id, params=(str(telegram_id),), fetch=True)
+
+    if not user:
+        logger.error(f"User with telegram_id={telegram_id} not found in the database.")
+        return None
+
+    user_id = user[0]["user_id"]
+
+    query_create_order = """
+        INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status, details)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING order_id;
+    """
+    return await db_execute(query_create_order, params=(user_id, cafe_id, menu_id, datetime.now(), "pending", details), fetch=True)
 
 @dp.callback_query(F.data.startswith("cancel_order_"))
 async def cancel_order(callback_query: types.CallbackQuery):
