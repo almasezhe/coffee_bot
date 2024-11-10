@@ -36,6 +36,11 @@ async def db_execute(query, params=None, fetch=False):
         logger.error(f"Database error: {e}")
         return None
 
+async def get_user_role_and_cafe(telegram_id):
+    query = "SELECT role, cafe_id FROM admins WHERE telegram_id::text = %s;"
+    result = await db_execute(query, params=(str(telegram_id),), fetch=True)
+    return result[0] if result else None
+
 
 ### FSM States ###
 
@@ -45,20 +50,137 @@ class AdminStates(StatesGroup):
     managing_users = State()
 
 
-### Command Handlers ###
+
+
+
+
+async def can_manage_cafes(telegram_id):
+    user = await get_user_role_and_cafe(telegram_id)
+    return user and user['role'] == 'owner' and user['cafe_id'] is None
+
+@dp.message(F.text == "Управление кафе")
+async def cafe_management(message: types.Message):
+    if not await can_manage_cafes(message.from_user.id):
+        await message.answer("У вас нет прав для управления кафе.")
+        return
+    # Proceed with cafe management logic
+
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    user = await get_user_role_and_cafe(message.from_user.id)
+    if not user:
+        await message.answer("У вас нет прав доступа.")
+        return
+
+    # Base menu
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="Управление кафе")],
             [types.KeyboardButton(text="Управление пользователями")],
             [types.KeyboardButton(text="Просмотр статистики")],
+            [types.KeyboardButton(text="Посмотреть Админов")],
         ],
         resize_keyboard=True,
     )
+
+    # Add "Посмотреть Админов" if user is owner
+
     await message.answer("Добро пожаловать в панель администратора. Выберите действие:", reply_markup=keyboard)
 
+
+@dp.message(F.text == "Посмотреть Админов")
+async def view_admins_menu(message: types.Message):
+    user = await get_user_role_and_cafe(message.from_user.id)
+    if not user or user["role"] != "owner" or user["cafe_id"] is not None:
+        await message.answer("У вас нет прав для управления администраторами.")
+        return
+
+    cafes = await retrieve_cafes()
+    if not cafes:
+        await message.answer("Нет активных кафе для управления администраторами.")
+        return
+
+    buttons = [
+        [InlineKeyboardButton(text=cafe["name"], callback_data=f"view_admins_{cafe['cafe_id']}")]
+        for cafe in cafes
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("Выберите кафе для просмотра и управления администраторами:", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("view_admins_"))
+async def view_admins(callback_query: types.CallbackQuery):
+    """View admins for the selected cafe and manage them."""
+    cafe_id = int(callback_query.data.split("_")[2])
+
+    # Fetch admins for the selected cafe
+    query = "SELECT admin_id, telegram_id, role FROM admins WHERE cafe_id = %s;"
+    admins = await db_execute(query, params=(cafe_id,), fetch=True)
+
+    # Prepare buttons for managing admins
+    buttons = []
+    if admins:
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=f"Удалить {admin['telegram_id']} ({admin['role']})",
+                    callback_data=f"delete_admin_{admin['admin_id']}_{cafe_id}"
+                )
+            ]
+            for admin in admins
+        ]
+    buttons.append([InlineKeyboardButton(text="Добавить Админа", callback_data=f"add_admin_{cafe_id}")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback_query.message.edit_text(
+        f"Администраторы кафе (ID: {cafe_id}):",
+        reply_markup=keyboard
+    )
+
+
+
+
+@dp.callback_query(F.data.startswith("add_admin_"))
+async def add_admin_start(callback_query: types.CallbackQuery, state: FSMContext):
+    """Start the process to add an admin to a selected cafe."""
+    cafe_id = int(callback_query.data.split("_")[2])
+    await state.update_data(selected_cafe=cafe_id)
+
+    # Clear buttons and prompt for admin Telegram ID
+    await callback_query.message.edit_text("Введите Telegram ID нового администратора:")
+    await state.set_state(AdminStates.managing_users)
+
+
+@dp.message(StateFilter(AdminStates.managing_users))
+async def finalize_add_admin(message: types.Message, state: FSMContext):
+    """Finalize adding a new admin."""
+    data = await state.get_data()
+    cafe_id = data["selected_cafe"]
+    new_admin_id = message.text.strip()
+
+    # Add admin to the database
+    query = "INSERT INTO admins (telegram_id, role, cafe_id) VALUES (%s, 'admin', %s) ON CONFLICT DO NOTHING;"
+    await db_execute(query, params=(new_admin_id, cafe_id))
+
+    await message.answer(f"Пользователь с Telegram ID {new_admin_id} успешно назначен администратором.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("delete_admin_"))
+async def delete_admin(callback_query: types.CallbackQuery):
+    """Delete an admin from the selected cafe."""
+    data = callback_query.data.split("_")
+    admin_id = int(data[2])
+    cafe_id = int(data[3])
+
+    # Remove the admin from the database
+    query = "DELETE FROM admins WHERE admin_id = %s;"
+    await db_execute(query, params=(admin_id,))
+
+    await callback_query.answer("Администратор успешно удалён.")
+
+    # Refresh admin list
+    await view_admins(callback_query)
 
 ### Cafe Management ###
 
@@ -75,6 +197,7 @@ async def cafe_management(message: types.Message):
             [InlineKeyboardButton(text="Добавить кафе", callback_data="add_cafe")],
             [InlineKeyboardButton(text="Удалить кафе", callback_data="remove_cafe")],
             [InlineKeyboardButton(text="Просмотреть список кафе", callback_data="view_cafes")],
+                    
         ]
     )
     await message.answer("Выберите действие для управления кафе:", reply_markup=keyboard)

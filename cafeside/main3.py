@@ -223,33 +223,44 @@ async def client_cancel_order(callback_query: CallbackQuery):
 
 
 async def monitor_order_status():
-    """Monitor the database for cancelled orders and notify admins."""
+    """Monitor the database for canceled orders and notify admins and cafes."""
     notified_orders = set()
 
     while True:
-        query = """
-            SELECT order_id, user_id, menu_id, order_date
-            FROM orders
-            WHERE cafe_id = %s AND status = 'canceled';
-        """
-        cancelled_orders = await db_execute(query, params=(cafe_id,), fetch=True)
+        try:
+            query = """
+                SELECT order_id, user_id, menu_id, order_date, cafe_id
+                FROM orders
+                WHERE status = 'canceled';
+            """
+            canceled_orders = await db_execute(query, fetch=True)
 
-        for order in cancelled_orders:
-            if order["order_id"] not in notified_orders:
-                notified_orders.add(order["order_id"])  # Чтобы не отправлять уведомление повторно
+            for order in canceled_orders:
+                if order["order_id"] not in notified_orders:
+                    notified_orders.add(order["order_id"])  # Avoid duplicate notifications
 
-                admin_contact = await get_admin_contact(cafe_id)
-                if admin_contact:
-                    await bot.send_message(
-                        chat_id=admin_contact,
-                        text=(
-                            f"❌ Заказ #{order['order_id']} был отменён.\n"
-                            f"Клиент: {order['user_id']}\n"
-                            f"Дата заказа: {order['order_date']}"
-                        )
+                    # Retrieve chat_id and admin telegram_id
+                    cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
+                    admin_telegram_id = await get_admin_contact(order["cafe_id"])
+
+                    message_text = (
+                        f"❌ Заказ #{order['order_id']} был отменён.\n"
+                        f"Клиент: {order['user_id']}\n"
+                        f"Дата заказа: {order['order_date']}"
                     )
 
-        await asyncio.sleep(4)  # Проверять каждые 4 секунды
+                    # Notify the cafe's chat
+                    if cafe_chat_id:
+                        await bot.send_message(chat_id=cafe_chat_id, text=message_text)
+
+                    # Notify the admin's private chat
+                    if admin_telegram_id:
+                        await bot.send_message(chat_id=admin_telegram_id, text=message_text)
+
+        except Exception as e:
+            logger.error(f"Error in monitor_order_status: {e}")
+
+        await asyncio.sleep(4)  # Wait before checking for canceled orders again
 
 
 @router.callback_query(F.data.startswith("toggle_"))
@@ -537,38 +548,45 @@ async def auto_push_new_orders():
             for order in orders:
                 if order["order_id"] not in already_notified:
                     already_notified.add(order["order_id"])
+                    
+                    # Retrieve chat_id and admin telegram_id
                     cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
+                    admin_telegram_id = await get_admin_contact(order["cafe_id"])
 
+                    message_text = (
+                        f"🆕 Новый заказ #{order['order_id']}:\n"
+                        f"Клиент: {order['user_id']}\n"
+                        f"Напиток: {order['coffee_name']}\n"
+                        f"Статус: {order['status']}"
+                    )
+                    buttons = [
+                        [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
+                    ]
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+                    # Notify the cafe's chat
                     if cafe_chat_id:
-                        buttons = [
-                            [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
-                        ]
-                        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-                        await send_notification(
-                            chat_id=cafe_chat_id,
-                            message_text=(
-                                f"Новый заказ #{order['order_id']}:\n"
-                                f"Клиент: {order['user_id']}\n"
-                                f"Напиток: {order['coffee_name']}\n"
-                                f"Статус: {order['status']}"
-                            ),
-                            reply_markup=keyboard
-                        )
+                        await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
+
+                    # Notify the admin's private chat
+                    if admin_telegram_id:
+                        await bot.send_message(chat_id=admin_telegram_id, text=message_text, reply_markup=keyboard)
+
         except Exception as e:
             logger.error(f"Error in auto_push_new_orders: {e}")
 
         await asyncio.sleep(4)  # Wait before checking for new orders again
+
 async def get_admin_contact(cafe_id):
-    """Retrieve the last chat_id or telegram_id for notifications."""
+    """Retrieve the admin's Telegram ID for a given cafe."""
     query = "SELECT telegram_id FROM admins WHERE cafe_id = %s LIMIT 1;"
     result = await db_execute(query, params=(cafe_id,), fetch=True)
-    if result:
-        return result[0]["telegram_id"]
-    return None
+    return result[0]["telegram_id"] if result else None
+
 
 
 async def get_cafe_chat_id(cafe_id):
-    """Retrieve the chat_id for the cafe."""
+    """Retrieve the chat ID for the cafe."""
     query = "SELECT chat_id FROM cafes WHERE cafe_id = %s;"
     result = await db_execute(query, params=(cafe_id,), fetch=True)
     return result[0]["chat_id"] if result else None
