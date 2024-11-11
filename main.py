@@ -44,8 +44,7 @@ async def db_execute(query, params=None, fetch=False):
 async def retrieve_cafe_schedule(cafe_id):
     """Получить расписание работы кафе на основе текущего дня."""
     # Определяем тип дня (будний, суббота или воскресенье)
-   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
-    weekday = 6
+    weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
     if weekday < 5:
         day_type = "будний"
     elif weekday == 5:

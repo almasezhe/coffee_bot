@@ -25,18 +25,21 @@ dp = Dispatcher()
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
+    """Выполняет запрос к базе данных с обработкой ошибок."""
     try:
         logger.info(f"Executing query: {query}, params: {params}")
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
-            db_connection.commit()
             if fetch:
                 result = cursor.fetchall()
                 logger.info(f"Query result: {result}")
                 return result
+            db_connection.commit()  # Коммит транзакции, если нет fetch
     except Exception as e:
         logger.error(f"Database error: {e} | Query: {query} | Params: {params}")
+        db_connection.rollback()  # Откатываем транзакцию, если была ошибка
         return None
+
 
 async def get_user_role_and_cafe(telegram_id):
     query = "SELECT role, cafe_id FROM admins WHERE telegram_id = %s;"
@@ -84,7 +87,7 @@ async def handle_add_cafe_schedule(message: types.Message, state: FSMContext):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     user = await get_user_role_and_cafe(message.from_user.id)
-    print(f"user :{user}")
+    print(f"user :{user} \n {message.from_user.id}")
     if not user:
         await message.answer("У вас нет прав доступа.")
         return
@@ -95,7 +98,7 @@ async def start(message: types.Message):
             [types.KeyboardButton(text="Управление кафе")],
             [types.KeyboardButton(text="Управление пользователями")],
             [types.KeyboardButton(text="Просмотр статистики")],
-            [types.KeyboardButton(text="Посмотреть Админов")],
+            #[types.KeyboardButton(text="Посмотреть Админов")],
         ],
         resize_keyboard=True,
     )
@@ -122,7 +125,7 @@ async def view_admins_menu(message: types.Message):
 async def view_admins(callback_query: types.CallbackQuery):
     cafe_id = int(callback_query.data.split("_")[2])
 
-    query = "SELECT admin_id, telegram_id, role FROM admins WHERE cafe_id = %s;"
+    query = "SELECT admin_id, telegram_id, telegram_username, role FROM admins WHERE cafe_id = %s;"
     admins = await db_execute(query, params=(cafe_id,), fetch=True)
 
     buttons = []
@@ -130,8 +133,8 @@ async def view_admins(callback_query: types.CallbackQuery):
         buttons = [
             [
                 InlineKeyboardButton(
-                    text=f"Удалить {admin['telegram_id']} ({admin['role']})",
-                    callback_data=f"delete_admin_{admin['telegram_id']}_{cafe_id}"
+                    text=f"Удалить {admin['telegram_username']} ({admin['role']})",
+                    callback_data=f"delete_admin_{admin['telegram_id']}_{cafe_id}_{admin['telegram_username']}"
                 )
             ]
             for admin in admins
@@ -149,7 +152,7 @@ async def add_admin_start(callback_query: types.CallbackQuery, state: FSMContext
     cafe_id = int(callback_query.data.split("_")[2])
     await state.update_data(selected_cafe=cafe_id)
 
-    await callback_query.message.edit_text("Введите Telegram ID администратора:")
+    await callback_query.message.edit_text("Введите Telegram ник администратора:")
     await state.set_state(AdminStates.managing_users)
 
 @dp.message(StateFilter(AdminStates.managing_users))
@@ -158,23 +161,76 @@ async def finalize_add_admin(message: types.Message, state: FSMContext):
     cafe_id = data["selected_cafe"]
     new_admin_username = message.text.strip()
 
-    query = "INSERT INTO admins (telegram_id, role, cafe_id) VALUES (%s, 'admin', %s) ON CONFLICT DO NOTHING;"
-    await db_execute(query, params=(new_admin_username, cafe_id))
+    # Шаг 1: Получение telegram_id пользователя
+    get_telegram_id_query = """
+    SELECT telegram_id 
+    FROM users 
+    WHERE username = %s;
+    """
+    result = await db_execute(get_telegram_id_query, params=(new_admin_username,), fetch=True)
 
-    await message.answer(f"Пользователь @{new_admin_username} успешно назначен администратором.")
+    if not result:
+        await message.answer(f"Ошибка: пользователь @{new_admin_username} не найден в системе.")
+        await state.clear()
+        return
+    print(result)
+    telegram_id = result[0]["telegram_id"]
+    print(telegram_id)
+    print(new_admin_username)
+    print(cafe_id)
+    # Шаг 2: Добавление администратора
+    add_admin_query = """
+    INSERT INTO admins (telegram_username, role, cafe_id, telegram_id)
+    VALUES (%s, 'admin', %s, %s)
+    RETURNING admin_id;
+    """
+    result = await db_execute(add_admin_query, params=(new_admin_username, cafe_id, telegram_id), fetch=True)
+
+    if result:
+        await message.answer(f"Пользователь @{new_admin_username} успешно назначен администратором.")
+    else:
+        await message.answer(f"Ошибка: пользователь @{new_admin_username} уже является администратором или данные указаны неверно.")
+
+    # Очистка состояния
     await state.clear()
+
+
 
 @dp.callback_query(F.data.startswith("delete_admin_"))
 async def delete_admin(callback_query: types.CallbackQuery):
-    data = callback_query.data.split("_")
-    admin_username = data[2]
-    cafe_id = int(data[3])
+    try:
+        # Разбираем данные из callback
+        data = callback_query.data.split("_")
+        admin_id = data[2]
+        cafe_id = int(data[3])
+        admin_username= data[4]
+        print(data)
+        # Проверяем, существует ли такой администратор
+        check_query = """
+        SELECT admin_id 
+        FROM admins 
+        WHERE telegram_id = %s AND cafe_id = %s;
+        """
+        result = await db_execute(check_query, params=(admin_id, cafe_id), fetch=True)
 
-    query = "DELETE FROM admins WHERE telegram_id = %s;"
-    await db_execute(query, params=(admin_username,))
+        if not result:
+            await callback_query.answer(f"Администратор @{admin_username} не найден для кафе с ID {cafe_id}.")
+            return
+        
+        # Если администратор найден, удаляем
+        delete_query = """
+        DELETE FROM admins 
+        WHERE telegram_id = %s AND cafe_id = %s;
+        """
+        await db_execute(delete_query, params=(admin_id, cafe_id))
 
-    await callback_query.answer("Администратор успешно удалён.")
-    await view_admins(callback_query)
+        await callback_query.answer(f"Администратор @{admin_username} успешно удалён.")
+        await view_admins(callback_query)
+
+    except Exception as e:
+        # В случае ошибки
+        await callback_query.answer(f"Ошибка при удалении администратора: {str(e)}")
+
 
 ### Cafe Management ###
 
@@ -250,6 +306,26 @@ async def remove_cafe_handler(callback_query: types.CallbackQuery):
         "Выберите кафе для удаления:",
         reply_markup=keyboard,
     )
+async def retrieve_cafe_schedule(cafe_id):
+    """Получить расписание работы кафе на основе текущего дня."""
+    # Определяем тип дня (будний, суббота или воскресенье)
+   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
+    weekday = 6
+    if weekday < 5:
+        day_type = "будний"
+    elif weekday == 5:
+        day_type = "суббота"
+    else:
+        day_type = "воскресенье"
+    
+    # SQL-запрос для получения расписания
+    query = """
+        SELECT open_time, close_time 
+        FROM working_hours 
+        WHERE cafe_id = %s AND day_type = %s;
+    """
+    schedule = await db_execute(query, params=(cafe_id, day_type), fetch=True)
+    return schedule[0] if schedule else None
 
 async def show_cafes_page(message, cafes, page=0):
     items_per_page = 4
@@ -258,14 +334,25 @@ async def show_cafes_page(message, cafes, page=0):
     end_idx = start_idx + items_per_page
     cafes_page = cafes[start_idx:end_idx]
 
-    buttons = [
-        [
-            InlineKeyboardButton(text=f"{cafe['name']}", callback_data=f"details_{cafe['cafe_id']}"),
-            InlineKeyboardButton(text=f"График: {cafe['working_hours'] or 'Не указан'}", callback_data="noop")
-        ]
-        for cafe in cafes_page
-    ]
+    buttons = []
+    for cafe in cafes_page:
+        # Получаем расписание для текущего дня
+        schedule = await retrieve_cafe_schedule(cafe["cafe_id"])
+        if schedule:
+            # Форматируем время работы
+            open_time = schedule["open_time"].strftime("%H:%M")
+            close_time = schedule["close_time"].strftime("%H:%M")
+            working_hours_text = f"{open_time} - {close_time}"
+        else:
+            working_hours_text = "Расписание не указано"
 
+        # Кнопки для каждого кафе
+        buttons.append([
+            InlineKeyboardButton(text=cafe["name"], callback_data=f"details_{cafe['cafe_id']}"),
+            InlineKeyboardButton(text=f"{working_hours_text}", callback_data="noop"),
+        ])
+
+    # Навигационные кнопки
     navigation_buttons = []
     if page > 0:
         navigation_buttons.append(InlineKeyboardButton("<--", callback_data=f"cafes_page_{page - 1}"))
