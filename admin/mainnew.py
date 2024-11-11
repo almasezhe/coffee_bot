@@ -48,6 +48,8 @@ class AdminStates(StatesGroup):
     removing_cafe = State()
     managing_users = State()
     adding_cafe_chat_id= State()
+    adding_cafe_schedule = State()
+
 
 async def can_manage_cafes(telegram_username):
     user = await get_user_role_and_cafe(telegram_username)
@@ -55,7 +57,26 @@ async def can_manage_cafes(telegram_username):
 
 
     # Proceed with cafe management logic
+@dp.message(StateFilter(AdminStates.adding_cafe_chat_id))
+async def handle_add_cafe_chat_id(message: types.Message, state: FSMContext):
+    chat_id = message.text.strip()
+    await state.update_data(chat_id=chat_id)
+    await message.answer("Введите график работы нового кафе (например: 09:00-18:00):")
+    await state.set_state(AdminStates.adding_cafe_schedule)
 
+
+@dp.message(StateFilter(AdminStates.adding_cafe_schedule))
+async def handle_add_cafe_schedule(message: types.Message, state: FSMContext):
+    schedule = message.text.strip()
+    data = await state.get_data()
+    cafe_name = data.get("cafe_name")
+    chat_id = data.get("chat_id")
+
+    query = "INSERT INTO cafes (name, chat_id, working_hours, is_active) VALUES (%s, %s, %s, TRUE);"
+    await db_execute(query, params=(cafe_name, chat_id, schedule))
+
+    await message.answer(f"Кафе '{cafe_name}' успешно добавлено с графиком работы: {schedule}!")
+    await state.clear()
 @dp.message(Command("start"))
 async def start(message: types.Message):
     user = await get_user_role_and_cafe(message.from_user.username)
@@ -67,7 +88,6 @@ async def start(message: types.Message):
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="Управление кафе")],
-            [types.KeyboardButton(text="Добавить меню в кафе")],
             [types.KeyboardButton(text="Управление пользователями")],
             [types.KeyboardButton(text="Просмотр статистики")],
             [types.KeyboardButton(text="Посмотреть Админов")],
@@ -80,9 +100,6 @@ async def start(message: types.Message):
 @dp.message(F.text == "Посмотреть Админов")
 async def view_admins_menu(message: types.Message):
     user = await get_user_role_and_cafe(message.from_user.username)
-    if not user or user["role"] != "owner" or user["cafe_id"] is not None:
-        await message.answer("У вас нет прав для управления администраторами.")
-        return
 
     cafes = await retrieve_cafes()
     if not cafes:
@@ -100,7 +117,7 @@ async def view_admins_menu(message: types.Message):
 async def view_admins(callback_query: types.CallbackQuery):
     cafe_id = int(callback_query.data.split("_")[2])
 
-    query = "SELECT admin_id, telegram_username, role FROM admins WHERE cafe_id = %s;"
+    query = "SELECT admin_id, telegram_id, role FROM admins WHERE cafe_id = %s;"
     admins = await db_execute(query, params=(cafe_id,), fetch=True)
 
     buttons = []
@@ -108,8 +125,8 @@ async def view_admins(callback_query: types.CallbackQuery):
         buttons = [
             [
                 InlineKeyboardButton(
-                    text=f"Удалить {admin['telegram_username']} ({admin['role']})",
-                    callback_data=f"delete_admin_{admin['telegram_username']}_{cafe_id}"
+                    text=f"Удалить {admin['telegram_id']} ({admin['role']})",
+                    callback_data=f"delete_admin_{admin['telegram_id']}_{cafe_id}"
                 )
             ]
             for admin in admins
@@ -127,7 +144,7 @@ async def add_admin_start(callback_query: types.CallbackQuery, state: FSMContext
     cafe_id = int(callback_query.data.split("_")[2])
     await state.update_data(selected_cafe=cafe_id)
 
-    await callback_query.message.edit_text("Введите Telegram никнейм администратора:")
+    await callback_query.message.edit_text("Введите Telegram ID администратора:")
     await state.set_state(AdminStates.managing_users)
 
 @dp.message(StateFilter(AdminStates.managing_users))
@@ -136,7 +153,7 @@ async def finalize_add_admin(message: types.Message, state: FSMContext):
     cafe_id = data["selected_cafe"]
     new_admin_username = message.text.strip()
 
-    query = "INSERT INTO admins (telegram_username, role, cafe_id) VALUES (%s, 'admin', %s) ON CONFLICT DO NOTHING;"
+    query = "INSERT INTO admins (telegram_id, role, cafe_id) VALUES (%s, 'admin', %s) ON CONFLICT DO NOTHING;"
     await db_execute(query, params=(new_admin_username, cafe_id))
 
     await message.answer(f"Пользователь @{new_admin_username} успешно назначен администратором.")
@@ -148,7 +165,7 @@ async def delete_admin(callback_query: types.CallbackQuery):
     admin_username = data[2]
     cafe_id = int(data[3])
 
-    query = "DELETE FROM admins WHERE telegram_username = %s;"
+    query = "DELETE FROM admins WHERE telegram_id = %s;"
     await db_execute(query, params=(admin_username,))
 
     await callback_query.answer("Администратор успешно удалён.")
@@ -157,9 +174,9 @@ async def delete_admin(callback_query: types.CallbackQuery):
 ### Cafe Management ###
 
 async def retrieve_cafes():
-    """Retrieve active cafes."""
     query = "SELECT * FROM cafes WHERE is_active = TRUE;"
     return await db_execute(query, fetch=True)
+
 
 
 @dp.message(F.text == "Управление кафе")
@@ -229,35 +246,33 @@ async def remove_cafe_handler(callback_query: types.CallbackQuery):
         reply_markup=keyboard,
     )
 
-async def show_cafes_page(message: types.Message, cafes, page: int = 0):
-    """Show a specific page of cafes."""
+async def show_cafes_page(message, cafes, page=0):
     items_per_page = 4
     total_pages = (len(cafes) + items_per_page - 1) // items_per_page
     start_idx = page * items_per_page
     end_idx = start_idx + items_per_page
     cafes_page = cafes[start_idx:end_idx]
 
-    # Create buttons for the cafes on the current page
     buttons = [
         [
-            InlineKeyboardButton(text=cafe["name"], callback_data=f"delete_cafe_{cafe['cafe_id']}")
+            InlineKeyboardButton(text=f"{cafe['name']}", callback_data=f"details_{cafe['cafe_id']}"),
+            InlineKeyboardButton(text=f"График: {cafe['working_hours'] or 'Не указан'}", callback_data="noop")
         ]
         for cafe in cafes_page
     ]
 
-    # Navigation buttons for pagination
     navigation_buttons = []
     if page > 0:
-        navigation_buttons.append(InlineKeyboardButton(text="<--", callback_data=f"cafes_page_{page - 1}"))
+        navigation_buttons.append(InlineKeyboardButton("<--", callback_data=f"cafes_page_{page - 1}"))
     if page < total_pages - 1:
-        navigation_buttons.append(InlineKeyboardButton(text="-->", callback_data=f"cafes_page_{page + 1}"))
+        navigation_buttons.append(InlineKeyboardButton("-->", callback_data=f"cafes_page_{page + 1}"))
 
     if navigation_buttons:
         buttons.append(navigation_buttons)
 
-    # Send or edit the message
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.edit_text("<b>Список активных кафе:</b>", reply_markup=keyboard, parse_mode="HTML")
+    await message.edit_text("<b>Список кафе:</b>", reply_markup=keyboard, parse_mode="HTML")
+
 
 
 @dp.callback_query(F.data.startswith("cafes_page_"))
