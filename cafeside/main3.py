@@ -113,12 +113,19 @@ async def show_menu_callback(callback_query: CallbackQuery):
 async def render_menu(message_or_callback, page: int = 0):
     """Render the menu for a specific page."""
     menu = await get_menu()
-
+    buttons = []
+    buttons.append([
+        InlineKeyboardButton(
+            text="Добавить напиток",
+            callback_data="add"
+        )
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     if not menu:
         if isinstance(message_or_callback, types.Message):
-            await message_or_callback.answer("Ваше меню пусто.")
+            await message_or_callback.answer("Ваше меню пусто.",reply_markup=keyboard)
         elif isinstance(message_or_callback, types.CallbackQuery):
-            await message_or_callback.message.edit_text("Ваше меню пусто.")
+            await message_or_callback.message.edit_text("Ваше меню пусто.",reply_markup=keyboard)
         return
 
     # Define pagination
