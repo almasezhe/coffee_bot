@@ -351,9 +351,10 @@ async def next_page(callback_query: types.CallbackQuery):
 async def get_incoming_orders():
     """Retrieve incoming orders for the current cafe."""
     query = """
-        SELECT o.order_id, o.user_id, o.menu_id, o.order_date, o.status, m.coffee_name
+        SELECT o.order_id, o.user_id, u.username, o.menu_id, o.order_date, o.status, m.coffee_name
         FROM orders o
         JOIN menu m ON o.menu_id = m.menu_id
+        JOIN users u ON o.user_id = u.user_id
         WHERE o.cafe_id = %s AND o.status = 'pending';
     """
     return await db_execute(query, params=(cafe_id,), fetch=True)
@@ -402,7 +403,7 @@ async def show_orders_callback(callback_query: CallbackQuery):
 
         await callback_query.message.answer(
             f"Заказ №{order['order_id']}:\n"
-            f"Клиент: {order['user_id']}\n"
+            f"Клиент: {order['username']}\n"
             f"Напиток: {order['coffee_name']}\n"
             f"Статус: {order['status']}",
             reply_markup=keyboard,
