@@ -41,7 +41,27 @@ async def db_execute(query, params=None, fetch=False):
         return None
 
 
-### Data Retrieval Helpers ###
+async def retrieve_cafe_schedule(cafe_id):
+    """Получить расписание работы кафе на основе текущего дня."""
+    # Определяем тип дня (будний, суббота или воскресенье)
+   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
+    weekday = 6
+    if weekday < 5:
+        day_type = "будний"
+    elif weekday == 5:
+        day_type = "суббота"
+    else:
+        day_type = "воскресенье"
+    
+    # SQL-запрос для получения расписания
+    query = """
+        SELECT open_time, close_time 
+        FROM working_hours 
+        WHERE cafe_id = %s AND day_type = %s;
+    """
+    schedule = await db_execute(query, params=(cafe_id, day_type), fetch=True)
+    return schedule[0] if schedule else None
+
 
 async def retrieve_cafe_options():
     query = "SELECT * FROM cafes WHERE is_active = TRUE;"
@@ -250,11 +270,17 @@ async def show_cafe_selection(message, page=0):
     end_idx = start_idx + items_per_page
     cafes_page = cafe_options[start_idx:end_idx]
 
-    # Кнопки для кафе
-    buttons = [
-        [InlineKeyboardButton(text=cafe["name"], callback_data=f"cafe_{cafe['cafe_id']}")]
-        for cafe in cafes_page
-    ]
+    # Кнопки для кафе с временем закрытия
+    buttons = []
+    for cafe in cafes_page:
+        schedule = await retrieve_cafe_schedule(cafe["cafe_id"])
+        if schedule:
+            close_time = schedule["close_time"].strftime("%H:%M")
+            open_time = schedule["open_time"].strftime("%H:%M")
+            text = f"{cafe['name']} ({cafe['location']}) - С {open_time} до {close_time}"
+        else:
+            text = f"{cafe['name']} ({cafe['location']}) - Расписание не указано"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"cafe_{cafe['cafe_id']}")])
 
     # Кнопки навигации
     navigation_buttons = []
@@ -268,7 +294,6 @@ async def show_cafe_selection(message, page=0):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    # Попытка редактирования сообщения, если невозможно — отправить новое
     try:
         await message.edit_text("Выберите кафе:", reply_markup=keyboard)
     except aiogram.exceptions.TelegramBadRequest:
@@ -285,26 +310,38 @@ async def navigate_cafe_pages(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("cafe_"))
 async def handle_cafe_selection(callback_query: types.CallbackQuery):
     """Обработка выбора кафе и отображение списка кофе."""
-    global coffee_options
-
-    # Получить ID выбранного кафе из callback_data
     cafe_id = int(callback_query.data.split("_")[1])
 
-    # Получить меню для выбранного кафе
-    coffee_options = await retrieve_menu(cafe_id)
-    if not coffee_options:
-        await callback_query.message.edit_text("В этом кафе пока нет доступного кофе.")
-        await callback_query.answer()
+    # Проверить расписание работы кафе
+    schedule = await retrieve_cafe_schedule(cafe_id)
+    if not schedule:
+        await callback_query.answer("У этого кафе нет указанного расписания.", show_alert=True)
         return
 
-    # Показать меню кофе
-    await show_coffee_selection(callback_query.message, cafe_id)
+    now = datetime.now().time()
+    if not (schedule["open_time"] <= now <= schedule["close_time"]):
+        await callback_query.answer("К сожалению, это кафе сейчас не работает.", show_alert=True)
+        return
+
+    # Попытка загрузить меню
+    try:
+        await show_coffee_selection(callback_query.message, cafe_id)
+    except Exception as e:
+        await callback_query.answer(f"Ошибка: {e}", show_alert=True)
     await callback_query.answer()
+
 
 async def show_coffee_selection(message, cafe_id, page=0):
     """Отображение списка кофе в выбранном кафе."""
     global coffee_options
 
+    # Получение меню для выбранного кафе
+    coffee_options = await retrieve_menu(cafe_id)
+    if not coffee_options:
+        await message.answer("В этом кафе пока нет доступного кофе.")
+        return
+
+    # Пагинация меню
     items_per_page = 4
     total_pages = (len(coffee_options) + items_per_page - 1) // items_per_page
     start_idx = page * items_per_page
@@ -339,6 +376,7 @@ async def show_coffee_selection(message, cafe_id, page=0):
         await message.edit_text("Выберите кофе:", reply_markup=keyboard)
     except aiogram.exceptions.TelegramBadRequest:
         await message.answer("Выберите кофе:", reply_markup=keyboard)
+
 
 @dp.callback_query(F.data.startswith("coffee_page_"))
 async def navigate_coffee_pages(callback_query: types.CallbackQuery):
