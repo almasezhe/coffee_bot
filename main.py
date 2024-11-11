@@ -467,7 +467,6 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
                 [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
             ]
         )
-        asyncio.create_task(monitor_order_status(telegram_id))
 
         await callback_query.message.answer(
             f"Ваш заказ #{order_id} успешно создан! Если хотите отменить, нажмите кнопку ниже.",
@@ -499,7 +498,6 @@ async def handle_order_comment(message: types.Message):
                 [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
             ]
         )
-        asyncio.create_task(monitor_order_status(telegram_id))
 
         await message.answer(
             f"Ваш заказ #{order_id} успешно создан с комментариями: {comment}. Если хотите отменить, нажмите кнопку ниже.",
@@ -575,48 +573,49 @@ async def cancel_order(callback_query: types.CallbackQuery):
 
 
 
-async def monitor_order_status(telegram_id):
-    """Monitor the status of an order and notify the user."""
-    try:
-        query = """
-            SELECT o.order_id, o.status, o.otp_code, m.coffee_name
-            FROM orders o
-            JOIN menu m ON o.menu_id = m.menu_id
-            JOIN users u ON o.user_id = u.user_id
-            WHERE u.telegram_id = %s
-            ORDER BY o.order_date DESC
-            LIMIT 1;
-        """
-        order = await db_execute(query, params=(str(telegram_id),), fetch=True)  # Cast telegram_id to string
+async def monitor_order_updates():
+    """Проверка обновлений статусов заказов и уведомление пользователей."""
+    while True:
+        try:
+            query = """
+                SELECT o.order_id, o.status, u.telegram_id
+                FROM orders o
+                JOIN users u ON o.user_id = u.user_id
+                WHERE o.status != 'готово' AND o.status_notified = FALSE;
+            """
+            pending_orders = await db_execute(query, fetch=True)
 
-        if not order:
-            logger.error(f"No recent orders found for telegram_id={telegram_id}")
-            return
+            for order in pending_orders:
+                order_id = order["order_id"]
+                last_status = order["status"]
+                telegram_id = order["telegram_id"]
 
-        order_id, last_status = order[0]["order_id"], order[0]["status"]
+                try:
+                    # Отправляем уведомление в зависимости от статуса
+                    if last_status == "готовится":
+                        await bot.send_message(
+                            chat_id=telegram_id,
+                            text=f"Ваш заказ №{order_id} обновлен. Статус: готовится."
+                        )
+                    elif last_status == "готово":
+                        await bot.send_message(
+                            chat_id=telegram_id,
+                            text=f"Ваш заказ №{order_id} готов! Пожалуйста, подождите пока кассир не сгенерирует OTP код."
+                        )
 
-        while last_status != "готово":
+                    # Обновляем флаг уведомления в базе данных
+                    update_query = "UPDATE orders SET status_notified = TRUE WHERE order_id = %s;"
+                    await db_execute(update_query, params=(order_id,))
+
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке уведомления о статусе заказа {order_id}: {e}")
+
+            # Ждём перед следующей проверкой
             await asyncio.sleep(5)
-            updated_order = await db_execute(query, params=(str(telegram_id),), fetch=True)
 
-            if not updated_order or updated_order[0]["status"] == last_status:
-                continue
+        except Exception as e:
+            logger.error(f"Ошибка в monitor_order_updates: {e}")
 
-            last_status = updated_order[0]["status"]
-            if last_status == "готовится":
-                await bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"Ваш заказ #{order_id} обновлен. Статус: готовится."
-                )
-            elif last_status == "готово":
-                otp_code = updated_order[0]["otp_code"]
-                await bot.send_message(
-                    chat_id=telegram_id,
-                    text=f"Ваш заказ #{order_id} готов! Пожалуйста, подождите пока кассир не сгенерирует OTP код"
-                )
-                break
-    except Exception as e:
-        logger.error(f"Ошибка в monitor_order_status: {e}")
 
 
 
@@ -659,6 +658,8 @@ async def main():
 
     # Запуск мониторинга OTP-кодов
     asyncio.create_task(monitor_otp_updates())
+    asyncio.create_task(monitor_order_updates())
+
     logger.info("Бот запущен и готов к работе")
     await dp.start_polling(bot)
 
