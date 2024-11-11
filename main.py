@@ -649,7 +649,7 @@ async def monitor_otp_updates():
                 logger.error(f"Ошибка при отправке OTP-кода пользователю {telegram_id}: {e}")
 
         # Ждём 1 секунду перед следующей проверкой
-        await asyncio.sleep(1)
+        await asyncio.sleep(5)
 
 
 async def main():
