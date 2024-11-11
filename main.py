@@ -270,19 +270,26 @@ async def show_cafe_selection(message, page=0):
     end_idx = start_idx + items_per_page
     cafes_page = cafe_options[start_idx:end_idx]
 
-    # Кнопки для кафе с временем закрытия
+    # Кнопки для кафе с временем работы и ссылкой на 2ГИС
     buttons = []
     for cafe in cafes_page:
         schedule = await retrieve_cafe_schedule(cafe["cafe_id"])
         if schedule:
             close_time = schedule["close_time"].strftime("%H:%M")
             open_time = schedule["open_time"].strftime("%H:%M")
-            text = f"{cafe['name']} ({cafe['location']}) - С {open_time} до {close_time}"
+            text = f"{cafe['name']} - С {open_time} до {close_time}"
         else:
-            text = f"{cafe['name']} ({cafe['location']}) - Расписание не указано"
-        buttons.append([InlineKeyboardButton(text=text, callback_data=f"cafe_{cafe['cafe_id']}")])
+            text = f"{cafe['name']} - Расписание не указано"
 
-    # Кнопки навигации
+        # Кнопка с названием кафе и кнопка "2ГИС" в одном ряду
+        row = [
+            InlineKeyboardButton(text=text, callback_data=f"cafe_{cafe['cafe_id']}"),   
+            InlineKeyboardButton(text=f"📍 {cafe["location"]}", url=cafe["location_url"]) if cafe.get("location_url") else None
+        ]
+        # Фильтруем None и добавляем в общий список
+        buttons.append([btn for btn in row if btn])
+
+    # Навигационные кнопки
     navigation_buttons = []
     if page > 0:
         navigation_buttons.append(InlineKeyboardButton(text="<--", callback_data=f"cafes_page_{page - 1}"))
