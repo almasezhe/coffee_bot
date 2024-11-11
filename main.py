@@ -284,7 +284,7 @@ async def show_cafe_selection(message, page=0):
         # Кнопка с названием кафе и кнопка "2ГИС" в одном ряду
         row = [
             InlineKeyboardButton(text=text, callback_data=f"cafe_{cafe['cafe_id']}"),   
-            InlineKeyboardButton(text=f"📍 {cafe["location"]}", url=cafe["location_url"]) if cafe.get("location_url") else None
+            InlineKeyboardButton(text=f"📍 {cafe['location']}", url=cafe["location_url"]) if cafe.get("location_url") else None
         ]
         # Фильтруем None и добавляем в общий список
         buttons.append([btn for btn in row if btn])
