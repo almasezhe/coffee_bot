@@ -21,25 +21,28 @@ DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-c
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
 
-db_connection = None
 
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
     try:
+        logger.info(f"Executing query: {query}, params: {params}")
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
             db_connection.commit()
             if fetch:
-                return cursor.fetchall()
+                result = cursor.fetchall()
+                logger.info(f"Query result: {result}")
+                return result
     except Exception as e:
-        logger.error(f"Database error: {e}")
+        logger.error(f"Database error: {e} | Query: {query} | Params: {params}")
         return None
 
-async def get_user_role_and_cafe(telegram_username):
-    query = "SELECT role, cafe_id FROM admins WHERE telegram_username = %s;"
-    result = await db_execute(query, params=(telegram_username,), fetch=True)
+async def get_user_role_and_cafe(telegram_id):
+    query = "SELECT role, cafe_id FROM admins WHERE telegram_id = %s;"
+    result = await db_execute(query, params=(str(telegram_id),), fetch=True)  # Преобразуем telegram_id в строку
     return result[0] if result else None
+
 
 ### FSM States ###
 
@@ -51,8 +54,9 @@ class AdminStates(StatesGroup):
     adding_cafe_schedule = State()
 
 
-async def can_manage_cafes(telegram_username):
-    user = await get_user_role_and_cafe(telegram_username)
+async def can_manage_cafes(telegram_id):
+    user = await get_user_role_and_cafe(telegram_id)
+    print(user['role'] == 'owner')
     return user and user['role'] == 'owner'
 
 
@@ -79,7 +83,8 @@ async def handle_add_cafe_schedule(message: types.Message, state: FSMContext):
     await state.clear()
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    user = await get_user_role_and_cafe(message.from_user.username)
+    user = await get_user_role_and_cafe(message.from_user.id)
+    print(f"user :{user}")
     if not user:
         await message.answer("У вас нет прав доступа.")
         return
