@@ -44,8 +44,7 @@ async def db_execute(query, params=None, fetch=False):
 async def retrieve_cafe_schedule(cafe_id):
     """Получить расписание работы кафе на основе текущего дня."""
     # Определяем тип дня (будний, суббота или воскресенье)
-   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
-    weekday = 6
+    weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
     if weekday < 5:
         day_type = "будний"
     elif weekday == 5:
@@ -247,14 +246,14 @@ async def handle_phone_number(message: types.Message):
     query = "UPDATE users SET phone_number = %s WHERE telegram_id = %s;"
     await db_execute(query, params=(phone_number, str(telegram_id)))
 
-    await message.answer("Ваш номер телефона успешно сохранён! Теперь вы можете оформить заказ.")
+    await message.answer("Ваш номер телефона успешно сохранён! Теперь вы можете оформить заказ.",reply_markup=None)
     await handle_order_request(message)  # Перезапускаем процесс оформления заказа
 
 
 @dp.message(F.text == "❌ Отказаться")
 async def handle_decline_phone_request(message: types.Message):
     """Обрабатываем отказ от предоставления номера телефона."""
-    await message.answer("Вы отказались предоставить номер телефона. Вы можете оформить заказ без него.")
+    await message.answer("Вы отказались предоставить номер телефона. Вы можете оформить заказ без него.",reply_markup=None)
 
 
 
