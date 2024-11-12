@@ -245,7 +245,7 @@ async def cafe_management(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Добавить кафе", callback_data="add_cafe")],
-            [InlineKeyboardButton(text="Удалить кафе", callback_data="remove_cafe")],
+            #[InlineKeyboardButton(text="Удалить кафе", callback_data="remove_cafe")],
             [InlineKeyboardButton(text="Просмотреть список кафе", callback_data="view_cafes")],
                     
         ]
@@ -410,7 +410,7 @@ async def view_cafes(callback_query: types.CallbackQuery):
 
 ### User Management ###
 async def retrieve_users():
-    query = "SELECT user_id, phone_number, subscription_status FROM users;"
+    query = "SELECT user_id, phone_number, username, subscription_status FROM users;"
     return await db_execute(query, fetch=True)
 
 
@@ -425,7 +425,7 @@ async def user_management(message: types.Message):
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{user['phone_number']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
+                text=f"{user['username']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
                 callback_data=f"toggle_user_{user['user_id']}"
             )
         ]

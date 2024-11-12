@@ -369,7 +369,6 @@ async def get_incoming_orders():
 
 async def update_order_status(order_id, status):
     """Update the status of an order."""
-    # Проверяем текущий статус заказа
     query = "SELECT status FROM orders WHERE order_id = %s;"
     result = await db_execute(query, params=(order_id,), fetch=True)
     
@@ -377,14 +376,14 @@ async def update_order_status(order_id, status):
         logger.warning(f"Заказ с ID {order_id} не найден.")
         return False  # Заказ не найден
 
-    if result[0]['status'] == 'canceled':
-        logger.warning(f"Попытка изменить статус отменённого заказа #{order_id}")
+    if result[0]['status'] in ['canceled', 'выдан']:
+        logger.warning(f"Попытка изменить статус отменённого или выданного заказа #{order_id}")
         return False  # Запрещаем изменение статуса
 
-    # Обновляем статус, если заказ не отменён
     query = "UPDATE orders SET status = %s WHERE order_id = %s;"
     await db_execute(query, params=(status, order_id))
     return True
+
 
 
 
@@ -397,14 +396,15 @@ async def show_orders_callback(callback_query: CallbackQuery):
         return
 
     for order in orders:
-        # If the order is pending, show only the "Принять" button
+        buttons = []
+
         if order["status"] == "pending":
-            buttons = [[InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]]
+            # Кнопки для принятия и отмены заказа
+            buttons.append([InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")])
+            buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe_{order['order_id']}")])
         elif order["status"] == "готовится":
-            buttons = [[InlineKeyboardButton(text="Готово", callback_data=f"done_{order['order_id']}")]]
-        else:
-            # Skip completed or invalid status orders
-            continue
+            # Кнопки для завершения и отмены заказа
+            buttons.append([InlineKeyboardButton(text="Готово", callback_data=f"done_{order['order_id']}")])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -415,6 +415,49 @@ async def show_orders_callback(callback_query: CallbackQuery):
             f"Статус: {order['status']}",
             reply_markup=keyboard,
         )
+@router.callback_query(F.data.startswith("cancel_cafe_"))
+async def handle_cafe_cancel_order(callback_query: CallbackQuery):
+    """Обработка отмены заказа со стороны кафе."""
+    try:
+        order_id = int(callback_query.data.split("_")[2])
+
+        # Проверяем текущий статус заказа
+        query = "SELECT status FROM orders WHERE order_id = %s;"
+        result = await db_execute(query, params=(order_id,), fetch=True)
+
+        if not result:
+            await callback_query.answer("Заказ не найден.", show_alert=True)
+            return
+
+        current_status = result[0]["status"]
+
+        if current_status in ["готово", "выдан"]:
+            await callback_query.answer("Этот заказ уже завершён и не может быть отменён.", show_alert=True)
+            return
+
+        # Отменяем заказ
+        update_query = "UPDATE orders SET status = 'canceled' WHERE order_id = %s;"
+        await db_execute(update_query, params=(order_id,))
+
+        # Уведомление клиента об отмене заказа
+        order_details = await get_order_by_id(order_id)
+        user_id = order_details["user_id"]
+        user = await get_user_by_id(user_id)
+
+        if user:
+            await bot.send_message(
+                chat_id=user["telegram_id"],
+                text=f"❌ Ваш заказ №{order_id} был отменён кафе."
+            )
+
+        # Уведомление кафе
+        await callback_query.message.edit_text(
+            f"Заказ №{order_id} был успешно отменён."
+        )
+        await callback_query.answer("Заказ отменён.")
+    except Exception as e:
+        logger.error(f"Ошибка отмены заказа кафе: {e}")
+        await callback_query.answer("Произошла ошибка при отмене заказа. Попробуйте позже.", show_alert=True)
 
 async def get_user_by_id(user_id):
     """Retrieve user information by user_id."""
@@ -500,25 +543,44 @@ async def generate_otp_code(callback_query: types.CallbackQuery):
     """Generate and send the OTP code for the order."""
     order_id = int(callback_query.data.split("_")[1])
 
-    # Generate a unique 4-digit OTP code
+    # Генерируем уникальный 4-значный OTP-код
     otp_code = str(uuid.uuid4().int)[:4]
     await update_order_otp(order_id, otp_code)
 
-    # Retrieve user information
-    order_details = await get_order_by_id(order_id)
-    user_id = order_details["user_id"]
-
-
-    # Update the message in the admin chat
-    await callback_query.message.answer(
-        f"Заказ №{order_id} завершён. Сверьте OTP код с клиентом: {otp_code}.",InlineKeyboardButton=None
+    # Обновляем сообщение для админа
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[   
+            [InlineKeyboardButton(text="Подтвердить выдачу", callback_data=f"confirm_issued_{order_id}")]
+        ]
     )
+    await callback_query.message.edit_text(
+        f"Заказ №{order_id} готов. OTP-код для клиента: {otp_code}.\n"
+        f"После сверки выдайте заказ и нажмите 'Подтвердить выдачу'.",
+        reply_markup=keyboard,
+    )
+    await callback_query.answer("OTP-код сгенерирован.")
 
 async def update_order_otp(order_id, otp_code):
     """Обновить OTP-код для заказа."""
     query = "UPDATE orders SET otp_code = %s WHERE order_id = %s;"
     await db_execute(query, params=(otp_code, order_id))
 
+@router.callback_query(F.data.startswith("confirm_issued_"))
+async def confirm_order_issued(callback_query: types.CallbackQuery):
+    """Handle confirming the order has been issued."""
+    order_id = int(callback_query.data.split("_")[2])
+
+    # Обновляем статус заказа на "выдан"
+    success = await update_order_status(order_id, "выдан")
+    if not success:
+        await callback_query.answer("Ошибка при обновлении статуса заказа.", show_alert=True)
+        return
+
+    # Обновляем сообщение для админа
+    await callback_query.message.answer(
+        f"Заказ №{order_id} успешно выдан клиенту. Спасибо за использование нашего сервиса!", reply_markup=None
+    )
+    await callback_query.answer("Заказ помечен как выдан.")
 
 
 async def get_order_by_id(order_id):
@@ -570,7 +632,8 @@ async def auto_push_new_orders():
                         f"Детали заказа: {order['details']}"
                     )
                     buttons = [
-                        [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")]
+                        [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")],
+                        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe_{order['order_id']}")]
                     ]
                     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 

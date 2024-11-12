@@ -44,7 +44,8 @@ async def db_execute(query, params=None, fetch=False):
 async def retrieve_cafe_schedule(cafe_id):
     """Получить расписание работы кафе на основе текущего дня."""
     # Определяем тип дня (будний, суббота или воскресенье)
-    weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
+   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
+    weekday = 6
     if weekday < 5:
         day_type = "будний"
     elif weekday == 5:
@@ -467,6 +468,7 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
                 [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
             ]
         )
+        asyncio.create_task(monitor_order_status(telegram_id))
 
         await callback_query.message.answer(
             f"Ваш заказ #{order_id} успешно создан! Если хотите отменить, нажмите кнопку ниже.",
@@ -486,6 +488,24 @@ async def handle_order_comment(message: types.Message):
         await message.answer("Произошла ошибка. Попробуйте снова.")
         return
 
+    # Проверка на лимит заказов в день
+    query_daily_orders = """
+        SELECT COUNT(*) AS daily_orders
+        FROM orders
+        JOIN users ON orders.user_id = users.user_id
+        WHERE users.telegram_id = %s
+          AND DATE(orders.order_date) = CURRENT_DATE
+          AND orders.status NOT IN ('canceled');  -- Исключаем отмененные заказы
+    """
+    result = await db_execute(query_daily_orders, params=(str(telegram_id),), fetch=True)
+    daily_orders = result[0]["daily_orders"] if result else 0
+
+    if daily_orders >= 1:
+        await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        # Очистить данные пользователя
+        user_data.pop(telegram_id, None)
+        return
+
     # Создать заказ с деталями
     comment = message.text
     order = await create_order_with_details(telegram_id, order_data["cafe_id"], order_data["menu_id"], comment)
@@ -498,6 +518,7 @@ async def handle_order_comment(message: types.Message):
                 [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
             ]
         )
+        asyncio.create_task(monitor_order_status(telegram_id))
 
         await message.answer(
             f"Ваш заказ #{order_id} успешно создан с комментариями: {comment}. Если хотите отменить, нажмите кнопку ниже.",
@@ -526,7 +547,9 @@ async def create_order_with_details(telegram_id, cafe_id, menu_id, details):
         VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING order_id;
     """
+    
     return await db_execute(query_create_order, params=(user_id, cafe_id, menu_id, datetime.now(), "pending", details), fetch=True)
+
 
 @dp.callback_query(F.data.startswith("cancel_order_"))
 async def cancel_order(callback_query: types.CallbackQuery):
@@ -557,64 +580,76 @@ async def cancel_order(callback_query: types.CallbackQuery):
 
         # Уведомление пользователя об успешной отмене
         await callback_query.message.edit_text(
-            f"Ваш заказ #{order_id} был успешно отменен. Теперь вы можете сделать другой заказ."
+            f"Ваш заказ #{order_id} был успешно отменён. Теперь вы можете сделать другой заказ."
         )
 
         # Отправляем новое сообщение и удаляем старое
         await callback_query.message.delete()
         await bot.send_message(
             chat_id=callback_query.message.chat.id,
-            text=f"Ваш заказ #{order_id} был успешно отменен. Теперь вы можете сделать другой заказ."
+            text=f"❌ Ваш заказ #{order_id} был отменён. Мы надеемся, вы сделаете новый заказ позже."
         )
-        await callback_query.answer("Ваш заказ отменен.")
+        await callback_query.answer("Ваш заказ отменён.")
     except (IndexError, ValueError) as e:
         logger.error(f"Ошибка отмены заказа: {e}")
         await callback_query.answer("Произошла ошибка при отмене заказа. Попробуйте позже.", show_alert=True)
 
 
 
-async def monitor_order_updates():
-    """Проверка обновлений статусов заказов и уведомление пользователей."""
-    while True:
-        try:
-            query = """
-                SELECT o.order_id, o.status, u.telegram_id
-                FROM orders o
-                JOIN users u ON o.user_id = u.user_id
-                WHERE o.status != 'готово' AND o.status_notified = FALSE;
-            """
-            pending_orders = await db_execute(query, fetch=True)
 
-            for order in pending_orders:
-                order_id = order["order_id"]
-                last_status = order["status"]
-                telegram_id = order["telegram_id"]
+async def monitor_order_status(telegram_id):
+    """Monitor the status of an order and notify the user."""
+    try:
+        query = """
+            SELECT o.order_id, o.status, o.otp_code, m.coffee_name
+            FROM orders o
+            JOIN menu m ON o.menu_id = m.menu_id
+            JOIN users u ON o.user_id = u.user_id
+            WHERE u.telegram_id = %s
+            ORDER BY o.order_date DESC
+            LIMIT 1;
+        """
+        order = await db_execute(query, params=(str(telegram_id),), fetch=True)  # Cast telegram_id to string
 
-                try:
-                    # Отправляем уведомление в зависимости от статуса
-                    if last_status == "готовится":
-                        await bot.send_message(
-                            chat_id=telegram_id,
-                            text=f"Ваш заказ №{order_id} обновлен. Статус: готовится."
-                        )
-                    elif last_status == "готово":
-                        await bot.send_message(
-                            chat_id=telegram_id,
-                            text=f"Ваш заказ №{order_id} готов! Пожалуйста, подождите пока кассир не сгенерирует OTP код."
-                        )
+        if not order:
+            logger.error(f"No recent orders found for telegram_id={telegram_id}")
+            return
 
-                    # Обновляем флаг уведомления в базе данных
-                    update_query = "UPDATE orders SET status_notified = TRUE WHERE order_id = %s;"
-                    await db_execute(update_query, params=(order_id,))
+        order_id, last_status = order[0]["order_id"], order[0]["status"]
 
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке уведомления о статусе заказа {order_id}: {e}")
-
-            # Ждём перед следующей проверкой
+        while last_status not in ["готово", "выдан"]:
             await asyncio.sleep(5)
+            updated_order = await db_execute(query, params=(str(telegram_id),), fetch=True)
 
-        except Exception as e:
-            logger.error(f"Ошибка в monitor_order_updates: {e}")
+            if not updated_order or updated_order[0]["status"] == last_status:
+                continue
+
+            last_status = updated_order[0]["status"]
+            if last_status == "готовится":
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"Ваш заказ #{order_id} обновлен. Статус: готовится."
+                )
+            elif last_status == "готово":
+                otp_code = updated_order[0]["otp_code"]
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"Ваш заказ #{order_id} готов! Пожалуйста, подождите, пока кассир не сгенерирует OTP код."
+                )
+            elif last_status == "выдан":
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"Ваш заказ #{order_id} выдан! Спасибо, что воспользовались нашим сервисом."
+                )
+                break
+            elif last_status == "canceled":
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"❌ Ваш заказ #{order_id} был отменён. Мы надеемся, вы сделаете новый заказ позже."
+                )
+                break
+    except Exception as e:
+        logger.error(f"Ошибка в monitor_order_status: {e}")
 
 
 
@@ -649,7 +684,7 @@ async def monitor_otp_updates():
                 logger.error(f"Ошибка при отправке OTP-кода пользователю {telegram_id}: {e}")
 
         # Ждём 1 секунду перед следующей проверкой
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 
 async def main():
@@ -658,8 +693,6 @@ async def main():
 
     # Запуск мониторинга OTP-кодов
     asyncio.create_task(monitor_otp_updates())
-    asyncio.create_task(monitor_order_updates())
-
     logger.info("Бот запущен и готов к работе")
     await dp.start_polling(bot)
 
