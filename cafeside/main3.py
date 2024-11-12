@@ -114,12 +114,12 @@ async def render_menu(message_or_callback, page: int = 0):
     """Render the menu for a specific page."""
     menu = await get_menu()
     buttons = []
-    buttons.append([
-        InlineKeyboardButton(
-            text="Добавить напиток",
-            callback_data="add"
-        )
-    ])
+  #  buttons.append([
+   #     InlineKeyboardButton(
+    #        text="Добавить напиток",
+     #       callback_data="add"
+      #  )
+    #])
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     if not menu:
         if isinstance(message_or_callback, types.Message):
@@ -145,17 +145,17 @@ async def render_menu(message_or_callback, page: int = 0):
                 text=f"{item['coffee_name']} ({availability})",
                 callback_data=f"toggle_{item['menu_id']}_{page}"
             ),
-            InlineKeyboardButton(
-                text="Удалить",
-                callback_data=f"delete_confirm_{item['menu_id']}_{page}"
-            )
+         #   InlineKeyboardButton(
+          #      text="Удалить",
+           #     callback_data=f"delete_confirm_{item['menu_id']}_{page}"
+            #)
         ])
-    buttons.append([
-        InlineKeyboardButton(
-            text="Добавить напиток",
-            callback_data="add"
-        )
-    ])
+   # buttons.append([
+    #    InlineKeyboardButton(
+     #       text="Добавить напиток",
+      #      callback_data="add"
+       # )
+    #])
     # Add navigation buttons
     navigation_buttons = []
     if page > 0:
