@@ -636,10 +636,6 @@ async def cancel_order(callback_query: types.CallbackQuery):
 
         # Отправляем новое сообщение и удаляем старое
         await callback_query.message.delete()
-        await bot.send_message(
-            chat_id=callback_query.message.chat.id,
-            text= f"🛑Ваш заказ #{order_id} был отменён🛑\n""Мы надеемся, вы сделаете новый заказ позже 🥺"
-        )
         await callback_query.answer("Ваш заказ отменён.")
     except (IndexError, ValueError) as e:
         logger.error(f"Ошибка отмены заказа: {e}")
