@@ -372,7 +372,7 @@ async def handle_cafe_selection(callback_query: types.CallbackQuery):
 
     now = datetime.now(astana_tz).time()
     if not (schedule["open_time"] <= now <= schedule["close_time"]):
-        await callback_query.answer(f"К сожалению кофейня сейчас закрыта, время работы кофейни: {schedule["open_time"]} - {schedule["close_time"]} \n\nВы можете заказать в другой кофейне", show_alert=True)
+        await callback_query.answer(f"К сожалению кофейня сейчас закрыта, время работы кофейни: {schedule['open_time']} - {schedule['close_time']} \n\nВы можете заказать в другой кофейне", show_alert=True)
         return
 
     # Попытка загрузить меню
