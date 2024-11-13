@@ -1,7 +1,7 @@
 import os
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -20,6 +20,7 @@ DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-c
 
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
+astana_tz = timezone(timedelta(hours=5))
 
 
 ### Database Helpers ###
@@ -95,9 +96,9 @@ async def start(message: types.Message):
     # Base menu
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="Управление кафе")],
+            #[types.KeyboardButton(text="Управление кафе")],
             [types.KeyboardButton(text="Управление пользователями")],
-            [types.KeyboardButton(text="Просмотр статистики")],
+            #[types.KeyboardButton(text="Просмотр статистики")],
             #[types.KeyboardButton(text="Посмотреть Админов")],
         ],
         resize_keyboard=True,
@@ -309,8 +310,7 @@ async def remove_cafe_handler(callback_query: types.CallbackQuery):
 async def retrieve_cafe_schedule(cafe_id):
     """Получить расписание работы кафе на основе текущего дня."""
     # Определяем тип дня (будний, суббота или воскресенье)
-   # weekday = datetime.now().weekday()  # Понедельник = 0, Воскресенье = 6
-    weekday = 6
+    weekday = datetime.now(astana_tz).weekday()  # Понедельник = 0, Воскресенье = 6
     if weekday < 5:
         day_type = "будний"
     elif weekday == 5:
@@ -425,7 +425,11 @@ async def user_management(message: types.Message):
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{user['username']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
+                text=(
+                    f"{user['username']} - "
+                    f"{user['phone_number'] + ' - ' if user['phone_number'] else ''}"
+                    f"{'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}"
+                ),
                 callback_data=f"toggle_user_{user['user_id']}"
             )
         ]
@@ -457,30 +461,73 @@ async def edit_user_management_message(message: types.Message):
 
     await message.edit_text("Список пользователей и их статус подписки:", reply_markup=keyboard)
 
+async def toggle_user_subscription(user_id: int):
+    """Toggle the subscription status of a user and update subscription dates."""
+    # Получить текущий статус пользователя
+    query_select = "SELECT subscription_status FROM users WHERE user_id = %s;"
+    user = await db_execute(query_select, params=(user_id,), fetch=True)
+    
+    if not user:
+        return None
+
+    current_status = user[0]['subscription_status']
+    new_status = not current_status  # Переключение статуса
+
+    if new_status:  # Если делаем активным
+        subscription_start_date = datetime.now().date()
+        subscription_end_date = subscription_start_date + timedelta(days=30)
+    else:  # Если отключаем подписку
+        subscription_start_date = None
+        subscription_end_date = None
+
+    # Обновление статуса и дат в базе данных
+    query_update = """
+        UPDATE users
+        SET subscription_status = %s,
+            subscription_start_date = %s,
+            subscription_end_date = %s
+        WHERE user_id = %s;
+    """
+    await db_execute(query_update, params=(
+        new_status,
+        subscription_start_date,
+        subscription_end_date,
+        user_id,
+    ))
+    return new_status
 
 @dp.callback_query(F.data.startswith("toggle_user_"))
-async def toggle_user_subscription(callback_query: types.CallbackQuery):
-    """Toggle the subscription status of a user and update the message."""
-    user_id = int(callback_query.data.split("_")[2])
-    user = next((u for u in await retrieve_users() if u["user_id"] == user_id), None)       
+async def handle_toggle_subscription(callback_query: types.CallbackQuery):
+    """Handle user subscription toggling."""
+    user_id = int(callback_query.data.split("_")[-1])
 
-    if not user:
-        await callback_query.answer("Пользователь не найден.", show_alert=True)
+    # Переключить статус
+    new_status = await toggle_user_subscription(user_id)
+    if new_status is None:
+        await callback_query.answer("Ошибка: Пользователь не найден.", show_alert=True)
         return
 
-    # Toggle subscription status
-    new_status = not user["subscription_status"]
-    query = "UPDATE users SET subscription_status = %s WHERE user_id = %s;"
-    await db_execute(query, params=(new_status, user_id))
+    # Обновить сообщение с клавиатурой
+    users = await retrieve_users()
+    if not users:
+        await callback_query.message.edit_text("Нет пользователей для отображения.")
+        return
 
-    # Notify the admin via a callback alert
-    await callback_query.answer(
-        f"Подписка пользователя {user['phone_number']} изменена на {'АКТИВНО' if new_status else 'НЕАКТИВНО'}.",
-        show_alert=True
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{user['username']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
+                callback_data=f"toggle_user_{user['user_id']}"
+            )
+        ]
+        for user in users
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await callback_query.message.edit_text(
+        "Список пользователей и их статус подписки:", reply_markup=keyboard
     )
-
-    # Edit the original message with the updated user list
-    await edit_user_management_message(callback_query.message)
+    await callback_query.answer("Статус подписки обновлен.")
 
 
 

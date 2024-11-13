@@ -2,7 +2,6 @@ import os
 import uuid
 import logging
 import asyncio
-from datetime import datetime
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot, Dispatcher, types, F
@@ -29,7 +28,6 @@ bot = Bot(token=API_KEY)
 dp = Dispatcher()
 
 db_connection = None
-cafe_id = 6  # Replace with the actual cafe ID
 router = Router()
 dp.include_router(router)
 
@@ -40,7 +38,7 @@ async def db_execute(query, params=None, fetch=False):
             cursor.execute(query, params)
             db_connection.commit()
             if fetch:
-                return cursor.fetchall()
+                return cursor.fetchall() or []
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
@@ -192,82 +190,62 @@ async def handle_new_menu_item(message: types.Message, state: FSMContext):
     await message.answer(f"Напиток '{coffee_name}' добавлен в меню.")
     await state.clear()
 
-@router.callback_query(F.data.startswith("client_cancel_"))
-async def client_cancel_order(callback_query: CallbackQuery):
-    """Handle client order cancellation."""
-    order_id = int(callback_query.data.split("_")[2])
-
-    # Update the order status to 'canceled'
-    await update_order_status(order_id, "canceled")
-
-    # Получаем контакт для уведомления (последний чат или личный ID)
-    admin_contact = await get_admin_contact(cafe_id)
-    if not admin_contact:
-        logger.error(f"Не удалось найти контакт администратора для cafe_id {cafe_id}.")
-        return
-
-    # Retrieve order details
-    order_details = await get_order_by_id(order_id)
-    if not order_details:
-        logger.error(f"Заказ с ID {order_id} не найден.")
-        return
-
-    # Send notification
-    await bot.send_message(
-        chat_id=admin_contact,
-        text=(
-            f"❌ Клиент отменил заказ №{order_id}.\n"
-            f"Клиент: {order_details['user_id']}\n"
-            f"Напиток: {order_details['coffee_name']}\n"
-            f"Дата заказа: {order_details['order_date']}"
-        )
-    )
-
-    # Notify the client about the successful cancellation
-    await callback_query.message.edit_text("Вы успешно отменили заказ.")
-    await callback_query.answer("Ваш заказ отменён.")
-
-
 
 async def monitor_order_status():
     """Monitor the database for canceled orders and notify admins and cafes."""
-    notified_orders = set()
-
     while True:
         try:
             query = """
-                SELECT order_id, user_id, menu_id, order_date, cafe_id
-                FROM orders
-                WHERE status = 'canceled';
+                SELECT 
+                    o.order_id, 
+                    o.user_id, 
+                    o.menu_id, 
+                    o.order_date, 
+                    o.status, 
+                    o.cancel_notified, 
+                    m.coffee_name, 
+                    u.username, 
+                    u.phone_number, 
+                    o.cafe_id
+                FROM orders o
+                JOIN menu m ON o.menu_id = m.menu_id
+                JOIN users u ON o.user_id = u.user_id
+                WHERE o.status = 'canceled' AND o.cancel_notified = FALSE;
             """
             canceled_orders = await db_execute(query, fetch=True)
 
             for order in canceled_orders:
-                if order["order_id"] not in notified_orders:
-                    notified_orders.add(order["order_id"])  # Avoid duplicate notifications
+                order_id = order["order_id"]
 
-                    # Retrieve chat_id and admin telegram_id
-                    cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
-                    admin_telegram_id = await get_admin_contact(order["cafe_id"])
+                # Retrieve cafe chat_id
+                cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                    message_text = (
-                        f"❌ Заказ #{order['order_id']} был отменён.\n"
-                        f"Клиент: {order['user_id']}\n"
-                        f"Дата заказа: {order['order_date']}"
-                    )
+                # Formulate message with detailed order info
+                message_text = (
+                    f"🔴 Заказ №{order_id} был отменён🔴\n"
+                    f"Клиент: {order['username']} \nНомер: {order['phone_number']})\n"
+                    f"Напиток: {order['coffee_name']}\n"
+                    f"Дата заказа: {order['order_date']}"
+                )
 
-                    # Notify the cafe's chat
-                    if cafe_chat_id:
-                        await bot.send_message(chat_id=cafe_chat_id, text=message_text)
+                # Notify the cafe's chat
+                if cafe_chat_id:
+                    await bot.send_message(chat_id=cafe_chat_id, text=message_text)
 
-                    # Notify the admin's private chat
-                    if admin_telegram_id:
-                        await bot.send_message(chat_id=admin_telegram_id, text=message_text)
+                    # Update the cancel_notified field to TRUE
+                    update_query = """
+                        UPDATE orders
+                        SET cancel_notified = TRUE
+                        WHERE order_id = %s;
+                    """
+                    await db_execute(update_query, params=(order_id,))
 
         except Exception as e:
             logger.error(f"Error in monitor_order_status: {e}")
 
-        await asyncio.sleep(4)  # Wait before checking for canceled orders again
+        await asyncio.sleep(2)  # Wait before checking for canceled orders again
+
+
 
 
 @router.callback_query(F.data.startswith("toggle_"))
@@ -358,7 +336,7 @@ async def next_page(callback_query: types.CallbackQuery):
 async def get_incoming_orders():
     """Retrieve incoming orders for the current cafe."""
     query = """
-        SELECT o.order_id, o.user_id, u.username, o.menu_id, o.order_date, o.status, m.coffee_name
+        SELECT o.order_id, o.user_id, u.username, o.menu_id, o.order_date, o.status, m.coffee_name, u.phone_number
         FROM orders o
         JOIN menu m ON o.menu_id = m.menu_id
         JOIN users u ON o.user_id = u.user_id
@@ -394,32 +372,31 @@ async def show_orders_callback(callback_query: CallbackQuery):
     if not orders:
         await callback_query.message.answer("Нет новых заказов.")
         return
-
+    phone_number = orders.get("username","Нету номера")
     for order in orders:
         buttons = []
 
         if order["status"] == "pending":
             # Кнопки для принятия и отмены заказа
-            buttons.append([InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")])
-            buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe_{order['order_id']}")])
-        elif order["status"] == "готовится":
-            # Кнопки для завершения и отмены заказа
-            buttons.append([InlineKeyboardButton(text="Готово", callback_data=f"done_{order['order_id']}")])
+            buttons.append([InlineKeyboardButton(text="Принять", callback_data=f"accept^{order['order_id']}")])
+            buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe^{order['order_id']}")])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         await callback_query.message.answer(
-            f"Заказ №{order['order_id']}:\n"
-            f"Клиент: {order['username']}\n"
+            f"🔵 Новый заказ #{order['order_id']}: 🔵\n"
+            f"Клиент: @{order['username']}\n"
+            f"Номер: {phone_number}\n"
             f"Напиток: {order['coffee_name']}\n"
-            f"Статус: {order['status']}",
+            f"Комментарий: {order['details']}\n",
             reply_markup=keyboard,
         )
-@router.callback_query(F.data.startswith("cancel_cafe_"))
+
+@router.callback_query(F.data.startswith("cancel_cafe^"))
 async def handle_cafe_cancel_order(callback_query: CallbackQuery):
     """Обработка отмены заказа со стороны кафе."""
     try:
-        order_id = int(callback_query.data.split("_")[2])
+        order_id = int(callback_query.data.split("^")[1])
 
         # Проверяем текущий статус заказа
         query = "SELECT status FROM orders WHERE order_id = %s;"
@@ -436,28 +413,37 @@ async def handle_cafe_cancel_order(callback_query: CallbackQuery):
             return
 
         # Отменяем заказ
-        update_query = "UPDATE orders SET status = 'canceled' WHERE order_id = %s;"
+        update_query = """
+                        UPDATE orders
+                        SET status = 'canceled', cancel_notified = TRUE
+                        WHERE order_id = %s;
+                    """
         await db_execute(update_query, params=(order_id,))
 
-        # Уведомление клиента об отмене заказа
+        # Получаем данные заказа
         order_details = await get_order_by_id(order_id)
-        user_id = order_details["user_id"]
-        user = await get_user_by_id(user_id)
-
-        if user:
-            await bot.send_message(
-                chat_id=user["telegram_id"],
-                text=f"❌ Ваш заказ №{order_id} был отменён кафе."
-            )
-
+        if not order_details:
+            await callback_query.answer("Ошибка: заказ не найден.", show_alert=True)
+            return
+        username = order_details.get("username", "Неизвестный пользователь")
+        phone_number = order_details.get("phone_number", "Не указан")
+        coffee_name = order_details.get("coffee_name", "Не указан")
+        details = order_details.get("details", "Нет комментария")
+        order_date = order_details.get("order_date", "Не указана")
         # Уведомление кафе
         await callback_query.message.edit_text(
-            f"Заказ №{order_id} был успешно отменён."
+            f"🔴 Заказ #{order_details['order_id']} был отменён 🔴\n"
+            f"Клиент: @{username}\n"
+            f"Номер: {phone_number}\n"
+            f"Напиток: {coffee_name}\n"
+            f"Комментарий: {details}\n"
+            f"Дата заказа: {order_date}\n"
         )
         await callback_query.answer("Заказ отменён.")
     except Exception as e:
         logger.error(f"Ошибка отмены заказа кафе: {e}")
         await callback_query.answer("Произошла ошибка при отмене заказа. Попробуйте позже.", show_alert=True)
+
 
 async def get_user_by_id(user_id):
     """Retrieve user information by user_id."""
@@ -466,59 +452,74 @@ async def get_user_by_id(user_id):
     return result[0] if result else None
 
 
-@router.callback_query(F.data.startswith("accept_"))
+@router.callback_query(F.data.startswith("accept^"))
 async def accept_order(callback_query: types.CallbackQuery):
-    """Handle accepting an order."""
-    order_id = int(callback_query.data.split("_")[1])
-
-    # Попытка обновить статус на "готовится"
-    success = await update_order_status(order_id, "готовится")
-    if not success:
-        await callback_query.answer("Нельзя изменить статус отменённого или несуществующего заказа.", show_alert=True)
+    
+    order_id = int(callback_query.data.split("^")[1])
+    # Получаем данные заказа из базы
+    order = await get_order_by_id(order_id)
+    print(order)
+    if not order:
+        await callback_query.answer("Заказ не найден.", show_alert=True)
         return
-
-    # Если статус успешно обновлён, обновляем сообщение и добавляем кнопку "Готово"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Готово", callback_data=f"done_{order_id}")]
-        ]
-    )
+            [InlineKeyboardButton(text="Готово", callback_data=f"done^{order_id}")]
+        ])
+    # Логика обработки
+    await update_order_status(order_id, "готовится")
     await callback_query.message.edit_text(
-        f"Заказ №{order_id} принят. Статус обновлён на 'готовится'.",
-        reply_markup=keyboard,
+        f"🟡Заказ #{order_id} принят🟡\n"
+        f"Клиент: @{order['username']}\n"
+        f"Номер: {order['phone_number']}\n"
+        f"Напиток: {order['coffee_name']}\n"
+        f"Комментарий: {order['details']}\n"
+        f"Статус был обновлён на: готовится",
+        reply_markup=keyboard
     )
     await callback_query.answer("Заказ принят.")
 
 
 
-
-
-@router.callback_query(F.data.startswith("done_"))
+@router.callback_query(F.data.startswith("done^"))
 async def complete_order(callback_query: types.CallbackQuery):
     """Handle completing an order."""
     try:
-        order_id = int(callback_query.data.split("_")[1])
+        order_id = int(callback_query.data.split("^")[1])
 
-        # Update the order status to "готово"
-        await update_order_status(order_id, "готово")
+        # Обновляем статус заказа на "готово"
+        success = await update_order_status(order_id, "готово")
+        if not success:
+            await callback_query.answer("Невозможно обновить статус заказа.", show_alert=True)
+            return
 
-        # Retrieve the order details
+        # Получаем детали заказа
         order_details = await get_order_by_id(order_id)
         if not order_details:
             await callback_query.answer("Ошибка: заказ не найден.", show_alert=True)
             return
 
-        # Add a button for generating OTP
+        # Генерируем клавиатуру с кнопкой для OTP
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Сгенерировать OTP", callback_data=f"generate_{order_id}")]
+                [
+                    InlineKeyboardButton(
+                        text="Сгенерировать OTP",
+                        callback_data=f"generate^{order_id}"
+                    )
+                ]
             ]
         )
 
-        # Update the admin message with the new status and button
+        # Обновляем сообщение администратора
         await callback_query.message.edit_text(
-            f"Заказ №{order_id} завершён. Статус обновлен на 'готово'.",
-            reply_markup=keyboard,
+            f"🟣Заказ №{order_details['order_id']} готов🟣\n"
+            f"Клиент: @{order_details['username']}\n"
+            f"Номер: {order_details['phone_number']}\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Комментарий: {order_details['details']}\n"
+            f"Статус был обновлён на: готов",
+            reply_markup=keyboard
         )
         await callback_query.answer("Статус заказа обновлён.")
     except Exception as e:
@@ -527,95 +528,135 @@ async def complete_order(callback_query: types.CallbackQuery):
 
 
 
+
 async def get_order_by_id(order_id):
     """Получить информацию о заказе по его order_id."""
     query = """
-        SELECT o.order_id, o.user_id, o.menu_id, o.order_date, o.status, m.coffee_name
+        SELECT 
+            o.order_id, 
+            o.user_id, 
+            o.menu_id, 
+            o.order_date, 
+            o.status, 
+            o.details, 
+            m.coffee_name, 
+            u.username, 
+            u.phone_number
         FROM orders o
         JOIN menu m ON o.menu_id = m.menu_id
+        JOIN users u ON o.user_id = u.user_id
         WHERE o.order_id = %s;
     """
     result = await db_execute(query, params=(order_id,), fetch=True)
+    print("DEBUG:", result)
     return result[0] if result else None
 
-@router.callback_query(F.data.startswith("generate_"))
+
+@router.callback_query(F.data.startswith("generate^"))
 async def generate_otp_code(callback_query: types.CallbackQuery):
     """Generate and send the OTP code for the order."""
-    order_id = int(callback_query.data.split("_")[1])
+    try:
+        order_id = int(callback_query.data.split("^")[1])
 
-    # Генерируем уникальный 4-значный OTP-код
-    otp_code = str(uuid.uuid4().int)[:4]
-    await update_order_otp(order_id, otp_code)
+        # Генерация уникального 4-значного OTP-кода
+        otp_code = str(uuid.uuid4().int)[:4]
+        await update_order_otp(order_id, otp_code)
 
-    # Обновляем сообщение для админа
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[   
-            [InlineKeyboardButton(text="Подтвердить выдачу", callback_data=f"confirm_issued_{order_id}")]
-        ]
-    )
-    await callback_query.message.edit_text(
-        f"Заказ №{order_id} готов. OTP-код для клиента: {otp_code}.\n"
-        f"После сверки выдайте заказ и нажмите 'Подтвердить выдачу'.",
-        reply_markup=keyboard,
-    )
-    await callback_query.answer("OTP-код сгенерирован.")
+        # Получение информации о заказе
+        order_details = await get_order_by_id(order_id)
+        if not order_details:
+            await callback_query.answer("Ошибка: заказ не найден.", show_alert=True)
+            return
+
+        # Клавиатура для подтверждения выдачи
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Подтвердить выдачу",
+                        callback_data=f"confirm_issued^{order_id}"
+                    )
+                ]
+            ]
+        )
+
+        # Обновление сообщения для админа
+        await callback_query.message.edit_text(
+            f"🟤Заказ №{order_details['order_id']} готов🟤\n"
+            f"Клиент: @{order_details['username']}\n"
+            f"Номер: {order_details['phone_number']}\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Комментарий: {order_details['details']}\n"
+            f"⭕️ OTP-код для клиента : {otp_code} ⭕️\n"
+            f"Если код совпадает, подтвердите выдачу.",
+            reply_markup=keyboard
+        )
+        await callback_query.answer("OTP-код сгенерирован.")
+    except Exception as e:
+        logger.error(f"Ошибка в обработке 'generate^': {e}")
+        await callback_query.answer("Произошла ошибка при генерации OTP-кода.", show_alert=True)
+
 
 async def update_order_otp(order_id, otp_code):
     """Обновить OTP-код для заказа."""
     query = "UPDATE orders SET otp_code = %s WHERE order_id = %s;"
     await db_execute(query, params=(otp_code, order_id))
 
-@router.callback_query(F.data.startswith("confirm_issued_"))
+@router.callback_query(F.data.startswith("confirm_issued^"))
 async def confirm_order_issued(callback_query: types.CallbackQuery):
     """Handle confirming the order has been issued."""
-    order_id = int(callback_query.data.split("_")[2])
-
-    # Обновляем статус заказа на "выдан"
-    success = await update_order_status(order_id, "выдан")
-    if not success:
-        await callback_query.answer("Ошибка при обновлении статуса заказа.", show_alert=True)
-        return
-
-    # Обновляем сообщение для админа
-    await callback_query.message.answer(
-        f"Заказ №{order_id} успешно выдан клиенту. Спасибо за использование нашего сервиса!", reply_markup=None
-    )
-    await callback_query.answer("Заказ помечен как выдан.")
-
-
-async def get_order_by_id(order_id):
-    """Retrieve order details by ID."""
-    query = """
-        SELECT o.order_id, o.user_id, o.menu_id, o.order_date, o.status, o.otp_code, o.details, m.coffee_name
-        FROM orders o
-        JOIN menu m ON o.menu_id = m.menu_id
-        WHERE o.order_id = %s;
-    """
-    result = await db_execute(query, params=(order_id,), fetch=True)
-    return result[0] if result else None
-async def send_notification(chat_or_user_id, message_text):
-    """Send a notification to a chat or user."""
     try:
-        await bot.send_message(chat_id=chat_or_user_id, text=message_text)
+        order_id = int(callback_query.data.split("^")[1])
+
+        # Обновляем статус заказа на "выдан"
+        success = await update_order_status(order_id, "выдан")
+        if not success:
+            await callback_query.answer("Ошибка при обновлении статуса заказа.", show_alert=True)
+            return
+
+        # Получаем информацию о заказе
+        order_details = await get_order_by_id(order_id)
+        if not order_details:
+            await callback_query.answer("Ошибка: заказ не найден.", show_alert=True)
+            return
+
+        # Обновляем сообщение для админа
+        await callback_query.message.edit_text(
+            f"✅ Заказ №{order_details['order_id']} успешно завершен ✅\n"
+            f"Клиент: @{order_details['username']}\n"
+            f"Номер: {order_details['phone_number']}\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Комментарий: {order_details['details']}\n"
+            f"Дата заказа: {order_details['order_date']}",
+        )
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+        await callback_query.answer("Заказ помечен как выдан.")
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления: {e}")
+        logger.error(f"Ошибка в обработке 'confirm_issued^': {e}")
+        await callback_query.answer("Произошла ошибка при подтверждении выдачи заказа.", show_alert=True)
+
+
+
 
 async def auto_push_new_orders():
     """Continuously check for new orders and notify the cafe."""
     already_notified = set()
-
     while True:
         try:
             # Get pending orders for all cafes along with username from users
             query = """
-                SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details
+                SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details, u.phone_number, o.order_date
                 FROM orders o
                 JOIN menu m ON o.menu_id = m.menu_id
                 JOIN users u ON o.user_id = u.user_id
                 WHERE o.status = 'pending';
             """
             orders = await db_execute(query, fetch=True)
-            
+            if not orders:
+                logger.info("Нет новых заказов для обработки.")
+                print(orders)
+                await asyncio.sleep(4)
+                continue
             for order in orders:
                 if order["order_id"] not in already_notified:
                     already_notified.add(order["order_id"])
@@ -625,25 +666,21 @@ async def auto_push_new_orders():
                     admin_telegram_id = await get_admin_contact(order["cafe_id"])
 
                     message_text = (
-                        f"🆕 Новый заказ #{order['order_id']}:\n"
-                        f"Клиент: @{order['username']}\n"  # Используем username
+                        f"🔵Новый заказ #{order['order_id']}:🔵\n"
+                        f"Клиент: @{order['username']}\n"
+                        f"Номер: {order['phone_number']}\n"
                         f"Напиток: {order['coffee_name']}\n"
-                        f"Статус: {order['status']}\n"
-                        f"Детали заказа: {order['details']}"
+                        f"Комментарий: {order['details']}"
                     )
                     buttons = [
-                        [InlineKeyboardButton(text="Принять", callback_data=f"accept_{order['order_id']}")],
-                        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe_{order['order_id']}")]
+                        [InlineKeyboardButton(text="Принять", callback_data=f"accept^{order['order_id']}")],
+                        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe^{order['order_id']}")]
                     ]
                     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
                     # Notify the cafe's chat
                     if cafe_chat_id:
                         await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
-
-                    # Notify the admin's private chat
-                    if admin_telegram_id:
-                        await bot.send_message(chat_id=admin_telegram_id, text=message_text, reply_markup=keyboard)
 
         except Exception as e:
             logger.error(f"Error in auto_push_new_orders: {e}")
