@@ -203,6 +203,7 @@ async def monitor_order_status():
                     o.order_date, 
                     o.status, 
                     o.cancel_notified, 
+                    o.message_id, 
                     m.coffee_name, 
                     u.username, 
                     u.phone_number, 
@@ -216,11 +217,12 @@ async def monitor_order_status():
 
             for order in canceled_orders:
                 order_id = order["order_id"]
+                message_id = order["message_id"]
 
                 # Retrieve cafe chat_id
                 cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                # Formulate message with detailed order info
+                # Formulate the cancellation message
                 message_text = (
                     f"🔴 Заказ №{order_id} был отменён🔴\n"
                     f"Клиент: {order['username']} \nНомер: {order['phone_number']}\n"
@@ -228,9 +230,13 @@ async def monitor_order_status():
                     f"Дата заказа: {order['order_date']}"
                 )
 
-                # Notify the cafe's chat
-                if cafe_chat_id:
-                    await bot.send_message(chat_id=cafe_chat_id, text=message_text)
+                # Update the existing message if message_id is available
+                if cafe_chat_id and message_id:
+                    await bot.edit_message_text(
+                        chat_id=cafe_chat_id,
+                        message_id=message_id,
+                        text=message_text,
+                    )
 
                     # Update the cancel_notified field to TRUE
                     update_query = """
@@ -244,6 +250,7 @@ async def monitor_order_status():
             logger.error(f"Error in monitor_order_status: {e}")
 
         await asyncio.sleep(2)  # Wait before checking for canceled orders again
+
 
 
 
@@ -372,7 +379,7 @@ async def show_orders_callback(callback_query: CallbackQuery):
     if not orders:
         await callback_query.message.answer("Нет новых заказов.")
         return
-    phone_number = orders.get("username","Нету номера")
+
     for order in orders:
         buttons = []
 
@@ -383,14 +390,23 @@ async def show_orders_callback(callback_query: CallbackQuery):
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        await callback_query.message.answer(
+        message = await callback_query.message.answer(
             f"🔵 Новый заказ #{order['order_id']}: 🔵\n"
             f"Клиент: @{order['username']}\n"
-            f"Номер: {phone_number}\n"
+            f"Номер: {order.get('phone_number', 'Нет номера')}\n"
             f"Напиток: {order['coffee_name']}\n"
             f"Комментарий: {order['details']}\n",
             reply_markup=keyboard,
         )
+
+        # Сохраняем message_id для обновления в будущем
+        update_query = """
+            UPDATE orders
+            SET message_id = %s
+            WHERE order_id = %s;
+        """
+        await db_execute(update_query, params=(message.message_id, order["order_id"]))
+
 
 @router.callback_query(F.data.startswith("cancel_cafe^"))
 async def handle_cafe_cancel_order(callback_query: CallbackQuery):
@@ -639,9 +655,10 @@ async def confirm_order_issued(callback_query: types.CallbackQuery):
 async def auto_push_new_orders():
     """Continuously check for new orders and notify the cafe."""
     already_notified = set()
+
     while True:
         try:
-            # Get pending orders for all cafes along with username from users
+            # Query to get pending orders
             query = """
                 SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details, u.phone_number, o.order_date
                 FROM orders o
@@ -650,38 +667,52 @@ async def auto_push_new_orders():
                 WHERE o.status = 'pending';
             """
             orders = await db_execute(query, fetch=True)
+
             if not orders:
                 logger.info("Нет новых заказов для обработки.")
-                print(orders)
                 await asyncio.sleep(4)
                 continue
+
             for order in orders:
-                if order["order_id"] not in already_notified:
-                    already_notified.add(order["order_id"])
-                    
-                    # Retrieve chat_id and admin telegram_id
-                    cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
-                    admin_telegram_id = await get_admin_contact(order["cafe_id"])
+                # Skip orders that are already notified
+                if order["order_id"] in already_notified:
+                    continue
 
-                    message_text = (
-                        f"🔵Новый заказ #{order['order_id']}:🔵\n"
-                        f"Клиент: @{order['username']}\n"
-                        f"Номер: {order['phone_number']}\n"
-                        f"Напиток: {order['coffee_name']}\n"
-                        f"Комментарий: {order['details']}"
-                    )
-                    buttons = [
-                        [InlineKeyboardButton(text="Принять", callback_data=f"accept^{order['order_id']}")],
-                        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe^{order['order_id']}")]
-                    ]
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+                already_notified.add(order["order_id"])
 
-                    # Notify the cafe's chat
-                    if cafe_chat_id:
-                        await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
+                # Retrieve chat_id and admin telegram_id
+                cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
+
+                # Formulate message text
+                message_text = (
+                    f"🔵 Новый заказ #{order['order_id']}: 🔵\n"
+                    f"Клиент: @{order['username']}\n"
+                    f"Номер: {order.get('phone_number', 'Нет номера')}\n"
+                    f"Напиток: {order['coffee_name']}\n"
+                    f"Комментарий: {order['details']}\n"
+                )
+
+                # Buttons for accepting or canceling the order
+                buttons = [
+                    [InlineKeyboardButton(text="Принять", callback_data=f"accept^{order['order_id']}")],
+                    [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe^{order['order_id']}")],
+                ]
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+                # Notify the cafe's chat
+                if cafe_chat_id:
+                    message = await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
+
+                    # Save the message_id for future updates
+                    update_query = """
+                        UPDATE orders
+                        SET message_id = %s
+                        WHERE order_id = %s;
+                    """
+                    await db_execute(update_query, params=(message.message_id, order["order_id"]))
 
         except Exception as e:
-            logger.error(f"Error in auto_push_new_orders: {e}")
+            logger.error(f"Error in monitor_pending_orders: {e}")
 
         await asyncio.sleep(4)  # Wait before checking for new orders again
 
