@@ -441,25 +441,6 @@ async def user_management(message: types.Message):
     await message.answer("Список пользователей и их статус подписки:", reply_markup=keyboard)
 
 
-async def edit_user_management_message(message: types.Message):
-    """Edit the existing user management message with updated data."""
-    users = await retrieve_users()
-    if not users:
-        await message.edit_text("Нет пользователей для отображения.")
-        return
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text=f"{user['phone_number']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
-                callback_data=f"toggle_user_{user['user_id']}"
-            )
-        ]
-        for user in users
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    await message.edit_text("Список пользователей и их статус подписки:", reply_markup=keyboard)
 
 async def toggle_user_subscription(user_id: int):
     """Toggle the subscription status of a user and update subscription dates."""
@@ -516,7 +497,11 @@ async def handle_toggle_subscription(callback_query: types.CallbackQuery):
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"{user['username']} - {'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}",
+                text=(
+                    f"{user['username']} - "
+                    f"{user['phone_number'] + ' - ' if user['phone_number'] else ''}"
+                    f"{'АКТИВНО' if user['subscription_status'] else 'НЕАКТИВНО'}"
+                ),
                 callback_data=f"toggle_user_{user['user_id']}"
             )
         ]

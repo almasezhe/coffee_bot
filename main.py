@@ -372,7 +372,7 @@ async def handle_cafe_selection(callback_query: types.CallbackQuery):
 
     now = datetime.now(astana_tz).time()
     if not (schedule["open_time"] <= now <= schedule["close_time"]):
-        await callback_query.answer("К сожалению, это кафе сейчас не работает.", show_alert=True)
+        await callback_query.answer(f"К сожалению кофейня сейчас закрыта, время работы кофейни: {schedule["open_time"]} - {schedule["close_time"]} \n\nВы можете заказать в другой кофейне", show_alert=True)
         return
 
     # Попытка загрузить меню
@@ -620,6 +620,9 @@ async def cancel_order(callback_query: types.CallbackQuery):
         elif current_status == "готово":
             await callback_query.answer("Этот заказ уже готов и не может быть отменен.", show_alert=True)
             return
+        elif current_status == "выдан":
+            await callback_query.answer("Этот заказ уже был выдан вам и не может быть отменен.", show_alert=True)
+            return
 
         # Если статус позволяет, отменяем заказ
         update_query = "UPDATE orders SET status = 'canceled' WHERE order_id = %s;"
@@ -815,7 +818,7 @@ async def monitor_subscription_updates():
                 try:
                     await bot.send_message(
                         chat_id=telegram_id,
-                        text="Спасибо за приобретение подписки! 🎉"
+                        text="Спасибо за приобретение подписки! 🎉\nТеперь вы можете оформить заказ 🤗"
                     )
                     # Обновляем флаг уведомления в базе данных
                     update_query = "UPDATE users SET subscription_notified = TRUE WHERE user_id = %s;"

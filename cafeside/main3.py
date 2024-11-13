@@ -223,7 +223,7 @@ async def monitor_order_status():
                 # Formulate message with detailed order info
                 message_text = (
                     f"🔴 Заказ №{order_id} был отменён🔴\n"
-                    f"Клиент: {order['username']} \nНомер: {order['phone_number']})\n"
+                    f"Клиент: {order['username']} \nНомер: {order['phone_number']}\n"
                     f"Напиток: {order['coffee_name']}\n"
                     f"Дата заказа: {order['order_date']}"
                 )
@@ -524,7 +524,6 @@ async def complete_order(callback_query: types.CallbackQuery):
         await callback_query.answer("Статус заказа обновлён.")
     except Exception as e:
         logger.error(f"Ошибка в обработке 'done_': {e}")
-        await callback_query.answer("Произошла ошибка при обновлении заказа.", show_alert=True)
 
 
 
