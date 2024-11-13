@@ -632,7 +632,6 @@ async def confirm_order_issued(callback_query: types.CallbackQuery):
         await callback_query.answer("Заказ помечен как выдан.")
     except Exception as e:
         logger.error(f"Ошибка в обработке 'confirm_issued^': {e}")
-        await callback_query.answer("Произошла ошибка при подтверждении выдачи заказа.", show_alert=True)
 
 
 
