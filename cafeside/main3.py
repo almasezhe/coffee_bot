@@ -105,7 +105,24 @@ async def start(message: types.Message):
         reply_markup=keyboard
     )
 
+@router.message(Command("menu"))
+async def show_menu_command(message: types.Message):
+    global cafe_id
+    # Fetch the cafe ID associated with this admin
+    admin_id = str(message.from_user.id)
 
+    query = "SELECT cafe_id FROM admins WHERE telegram_id = %s;"
+    result = await db_execute(query, params=(admin_id,), fetch=True)
+
+    if not result:
+        await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
+        return
+
+    # Extract the cafe_id from the query result
+    cafe_id = result[0]["cafe_id"]
+
+    await render_menu(message, page=0)
+    
 @router.callback_query(F.data == "menu")
 async def show_menu_callback(callback_query: CallbackQuery):
     await render_menu(callback_query.message, page=0)
