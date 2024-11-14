@@ -302,24 +302,14 @@ async def handle_decline_phone_request(message: types.Message):
     await show_cafe_selection(message)
 
 
-
-
-
 async def show_cafe_selection(message, page=0):
     global cafe_options
     if not cafe_options:
         await message.answer("Нет доступных заведений.")
         return
 
-    items_per_page = 4
-    total_pages = (len(cafe_options) + items_per_page - 1) // items_per_page
-    start_idx = page * items_per_page
-    end_idx = start_idx + items_per_page
-    cafes_page = cafe_options[start_idx:end_idx]
-
-    # Кнопки для кафе с временем работы и ссылкой на 2ГИС
     buttons = []
-    for cafe in cafes_page:
+    for cafe in cafe_options:
         schedule = await retrieve_cafe_schedule(cafe["cafe_id"])
         if schedule:
             close_time = schedule["close_time"].strftime("%H:%M")
@@ -336,29 +326,12 @@ async def show_cafe_selection(message, page=0):
         # Фильтруем None и добавляем в общий список
         buttons.append([btn for btn in row if btn])
 
-    # Навигационные кнопки
-    navigation_buttons = []
-    if page > 0:
-        navigation_buttons.append(InlineKeyboardButton(text="<--", callback_data=f"cafes_page_{page - 1}"))
-    if page < total_pages - 1:
-        navigation_buttons.append(InlineKeyboardButton(text="-->", callback_data=f"cafes_page_{page + 1}"))
-
-    if navigation_buttons:
-        buttons.append(navigation_buttons)
-
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     try:
         await message.edit_text("Выберите кофейню 👇:", reply_markup=keyboard)
     except aiogram.exceptions.TelegramBadRequest:
         await message.answer("Выберите кофейню 👇:", reply_markup=keyboard)
-
-@dp.callback_query(F.data.startswith("cafes_page_"))
-async def navigate_cafe_pages(callback_query: types.CallbackQuery):
-    """Навигация по страницам кафе."""
-    page = int(callback_query.data.split("_")[2])
-    await show_cafe_selection(callback_query.message, page=page)
-    await callback_query.answer()
 
 
 @dp.callback_query(F.data.startswith("cafe_"))
@@ -396,12 +369,6 @@ async def show_coffee_selection(message, cafe_id, page=0):
         return
 
     # Пагинация меню
-    items_per_page = 4
-    total_pages = (len(coffee_options) + items_per_page - 1) // items_per_page
-    start_idx = page * items_per_page
-    end_idx = start_idx + items_per_page
-    coffee_page = coffee_options[start_idx:end_idx]
-
     # Создание кнопок для кофе
     buttons = [
         [
@@ -410,41 +377,17 @@ async def show_coffee_selection(message, cafe_id, page=0):
                 callback_data=f"coffee_{coffee['menu_id']}_{cafe_id}"
             )
         ]
-        for coffee in coffee_page
+        for coffee in coffee_options
     ]
-
-    # Навигационные кнопки
-    navigation_buttons = []
-    if page > 0:
-        navigation_buttons.append(InlineKeyboardButton(text="<--", callback_data=f"coffee_page_{cafe_id}_{page - 1}"))
-    if page < total_pages - 1:
-        navigation_buttons.append(InlineKeyboardButton(text="-->", callback_data=f"coffee_page_{cafe_id}_{page + 1}"))
-
-    if navigation_buttons:
-        buttons.append(navigation_buttons)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    # Попытка редактирования сообщения, если невозможно — отправить новое
     try:
         await message.edit_text("Выберите кофе 👇:", reply_markup=keyboard)
     except aiogram.exceptions.TelegramBadRequest:
         await message.answer("Выберите кофе 👇:", reply_markup=keyboard)
 
 
-@dp.callback_query(F.data.startswith("coffee_page_"))
-async def navigate_coffee_pages(callback_query: types.CallbackQuery):
-    """Навигация по страницам кофе."""
-    try:
-        data = callback_query.data.split("_")
-        cafe_id = int(data[2])
-        page = int(data[3])
-
-        await show_coffee_selection(callback_query.message, cafe_id, page=page)
-        await callback_query.answer()
-    except (IndexError, ValueError) as e:
-        logger.error(f"Ошибка обработки навигации кофе: {e}")
-        await callback_query.answer("Неверный формат данных. Попробуйте снова.", show_alert=True)
 
 @dp.callback_query(F.data.startswith("coffee_"))
 async def handle_coffee_selection(callback_query: types.CallbackQuery):
@@ -816,7 +759,7 @@ async def monitor_subscription_updates():
                 try:
                     await bot.send_message(
                         chat_id=telegram_id,
-                        text="Спасибо за приобретение подписки! 🎉\nТеперь вы можете оформить заказ 🤗"
+                        text="Поздравляем, вы приобрели подписку Refill 🎉\n\nДобро пожаловать в сервис, где заботятся о тех кто любит кофе 🤗\n\nПриятного использования 🫶"
                     )
                     # Обновляем флаг уведомления в базе данных
                     update_query = "UPDATE users SET subscription_notified = TRUE WHERE user_id = %s;"

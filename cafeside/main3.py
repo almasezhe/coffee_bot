@@ -132,12 +132,7 @@ async def render_menu(message_or_callback, page: int = 0):
     """Render the menu for a specific page."""
     menu = await get_menu()
     buttons = []
-  #  buttons.append([
-   #     InlineKeyboardButton(
-    #        text="Добавить напиток",
-     #       callback_data="add"
-      #  )
-    #])
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     if not menu:
         if isinstance(message_or_callback, types.Message):
@@ -146,17 +141,7 @@ async def render_menu(message_or_callback, page: int = 0):
             await message_or_callback.message.edit_text("Ваше меню пусто.",reply_markup=keyboard)
         return
 
-    # Define pagination
-    items_per_page = 4
-    total_items = len(menu)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
-    start_idx = page * items_per_page
-    end_idx = start_idx + items_per_page
-    menu_page = menu[start_idx:end_idx]
-
-    # Build the buttons for the current page
-    buttons = []
-    for item in menu_page:
+    for item in menu:
         availability = "Доступно" if item["is_available"] else "Недоступно"
         buttons.append([
             InlineKeyboardButton(
@@ -175,14 +160,6 @@ async def render_menu(message_or_callback, page: int = 0):
        # )
     #])
     # Add navigation buttons
-    navigation_buttons = []
-    if page > 0:
-        navigation_buttons.append(InlineKeyboardButton(text="<", callback_data=f"prev_page_{page - 1}"))
-    if page < total_pages - 1:
-        navigation_buttons.append(InlineKeyboardButton(text=">", callback_data=f"next_page_{page + 1}"))
-    if navigation_buttons:
-        buttons.append(navigation_buttons)
-
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if isinstance(message_or_callback, types.Message):
