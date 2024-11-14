@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # API Key and Database URL
 API_KEY = "8103008160:AAFlMNkjk84genN5awpUcUDIayEc3DJyHO0"
 DB_URL="postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-
+import asyncpg
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
 astana_tz = timezone(timedelta(hours=5))
@@ -29,18 +29,37 @@ is_coffee_chosen = False
 user_data = {}
 ### Database Helpers ###
 
+MAX_RETRIES = 5
+## TODO ADD another library
 async def db_execute(query, params=None, fetch=False):
-    if db_connection.closed:
-        db_connection = psycopg2.connect(DB_URL)
-    try:
-        with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(query, params)
-            db_connection.commit()
-            if fetch:   
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Database error: {e}")
-        return None
+    """Asynchronous function to execute a database query with auto-reconnect."""
+    retries = 0  # Счетчик попыток
+
+    while retries < MAX_RETRIES:
+        try:
+            # Устанавливаем подключение
+            connection = await asyncpg.connect(DB_URL)
+            
+            # Выполняем запрос
+            if fetch:
+                result = await connection.fetch(query, *params) if params else await connection.fetch(query)
+                return result
+            else:
+                await connection.execute(query, *params) if params else await connection.execute(query)
+                return None
+        except (asyncpg.exceptions.PostgresError, ConnectionError) as e:
+            # Логируем ошибку и пробуем переподключиться
+            logger.error(f"Database connection error: {e}. Retrying ({retries + 1}/{MAX_RETRIES})...")
+            retries += 1
+            await asyncio.sleep(1)  # Ждем перед повторной попыткой
+        finally:
+            # Закрываем соединение, если оно было открыто
+            if 'connection' in locals() and not connection.is_closed():
+                await connection.close()
+    
+    # Если все попытки не удались, выбрасываем исключение
+    logger.critical("Maximum retries reached. Could not connect to the database.")
+    raise RuntimeError("Failed to execute query after multiple retries.")
 
 
 async def retrieve_cafe_schedule(cafe_id):

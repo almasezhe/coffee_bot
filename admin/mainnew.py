@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from psycopg2.extras import RealDictCursor
 import psycopg2
-
+import asyncpg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,27 +23,37 @@ dp = Dispatcher()
 astana_tz = timezone(timedelta(hours=5))
 
 
-### Database Helpers ###
-
+MAX_RETRIES = 5
+## TODO ADD another library
 async def db_execute(query, params=None, fetch=False):
-    """Выполняет запрос к базе данных с обработкой ошибок."""
-    if db_connection.closed:
-        db_connection = psycopg2.connect(DB_URL)
+    """Asynchronous function to execute a database query with auto-reconnect."""
+    retries = 0  # Счетчик попыток
 
-    try:
-        
-        logger.info(f"Executing query: {query}, params: {params}")
-        with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(query, params)
+    while retries < MAX_RETRIES:
+        try:
+            # Устанавливаем подключение
+            connection = await asyncpg.connect(DB_URL)
+            
+            # Выполняем запрос
             if fetch:
-                result = cursor.fetchall()
-                logger.info(f"Query result: {result}")
+                result = await connection.fetch(query, *params) if params else await connection.fetch(query)
                 return result
-            db_connection.commit()  # Коммит транзакции, если нет fetch
-    except Exception as e:
-        logger.error(f"Database error: {e} | Query: {query} | Params: {params}")
-        db_connection.rollback()  # Откатываем транзакцию, если была ошибка
-        return None
+            else:
+                await connection.execute(query, *params) if params else await connection.execute(query)
+                return None
+        except (asyncpg.exceptions.PostgresError, ConnectionError) as e:
+            # Логируем ошибку и пробуем переподключиться
+            logger.error(f"Database connection error: {e}. Retrying ({retries + 1}/{MAX_RETRIES})...")
+            retries += 1
+            await asyncio.sleep(1)  # Ждем перед повторной попыткой
+        finally:
+            # Закрываем соединение, если оно было открыто
+            if 'connection' in locals() and not connection.is_closed():
+                await connection.close()
+    
+    # Если все попытки не удались, выбрасываем исключение
+    logger.critical("Maximum retries reached. Could not connect to the database.")
+    raise RuntimeError("Failed to execute query after multiple retries.")
 
 
 async def get_user_role_and_cafe(telegram_id):
