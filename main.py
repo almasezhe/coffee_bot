@@ -30,6 +30,8 @@ user_data = {}
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
+    if db_connection.closed:
+        db_connection = psycopg2.connect(DB_URL)
     try:
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)

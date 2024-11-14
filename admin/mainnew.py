@@ -27,7 +27,11 @@ astana_tz = timezone(timedelta(hours=5))
 
 async def db_execute(query, params=None, fetch=False):
     """Выполняет запрос к базе данных с обработкой ошибок."""
+    if db_connection.closed:
+        db_connection = psycopg2.connect(DB_URL)
+
     try:
+        
         logger.info(f"Executing query: {query}, params: {params}")
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)

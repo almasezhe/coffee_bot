@@ -33,6 +33,8 @@ dp.include_router(router)
 
 async def db_execute(query, params=None, fetch=False):
     """Helper function to execute a query on the database."""
+    if db_connection.closed:
+        db_connection = psycopg2.connect(DB_URL)
     try:
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
