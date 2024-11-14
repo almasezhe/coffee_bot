@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeybo
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import re
-import asyncpg
+
 from aiogram import Router, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
@@ -28,40 +28,23 @@ class MenuState(StatesGroup):
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
 
-db_connection = None
 router = Router()
 dp.include_router(router)
-MAX_RETRIES = 5
-## TODO ADD another library
-async def db_execute(query, params=None, fetch=False):
-    """Asynchronous function to execute a database query with auto-reconnect."""
-    retries = 0  # Счетчик попыток
 
-    while retries < MAX_RETRIES:
-        try:
-            # Устанавливаем подключение
-            connection = await asyncpg.connect(DB_URL)
-            
-            # Выполняем запрос
+async def db_execute(query, params=None, fetch=False):
+    """Helper function to execute a query on the database."""
+    global db_connection
+    if db_connection.closed:
+        db_connection = psycopg2.connect(DB_URL)
+    try:
+        with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, params)
+            db_connection.commit()
             if fetch:
-                result = await connection.fetch(query, *params) if params else await connection.fetch(query)
-                return result
-            else:
-                await connection.execute(query, *params) if params else await connection.execute(query)
-                return None
-        except (asyncpg.exceptions.PostgresError, ConnectionError) as e:
-            # Логируем ошибку и пробуем переподключиться
-            logger.error(f"Database connection error: {e}. Retrying ({retries + 1}/{MAX_RETRIES})...")
-            retries += 1
-            await asyncio.sleep(1)  # Ждем перед повторной попыткой
-        finally:
-            # Закрываем соединение, если оно было открыто
-            if 'connection' in locals() and not connection.is_closed():
-                await connection.close()
-    
-    # Если все попытки не удались, выбрасываем исключение
-    logger.critical("Maximum retries reached. Could not connect to the database.")
-    raise RuntimeError("Failed to execute query after multiple retries.")
+                return cursor.fetchall() or []
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        return None
 
 
 ### MENU MANAGEMENT ###
