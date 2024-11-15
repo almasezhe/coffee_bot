@@ -12,7 +12,6 @@ import aiogram
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 # API Key and Database URL
 API_KEY = "8103008160:AAFlMNkjk84genN5awpUcUDIayEc3DJyHO0"
 DB_URL="postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
@@ -85,14 +84,51 @@ async def create_order(telegram_id, cafe_id, menu_id):
 
     user_id = user[0]["user_id"]
 
+    # Check for unfinished orders
+    unfinished_query = """
+        SELECT COUNT(*) AS unfinished_orders
+        FROM orders
+        WHERE user_id = %s AND is_finished = FALSE;
+    """
+    unfinished_result = await db_execute(unfinished_query, params=(user_id,), fetch=True)
+    unfinished_orders = unfinished_result[0]["unfinished_orders"] if unfinished_result else 0
+
+    if unfinished_orders > 0:
+        logger.info(f"User with telegram_id={telegram_id} has unfinished orders. Cannot create a new order.")
+        #TODO 
+        return {"error": "У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый."}
+
+    # Check daily limit
+    daily_limit_query = """
+        SELECT COUNT(*) AS daily_orders
+        FROM orders
+        WHERE user_id = %s
+          AND DATE(order_date) = CURRENT_DATE
+          AND status NOT IN ('canceled');
+    """
+    daily_limit_result = await db_execute(daily_limit_query, params=(user_id,), fetch=True)
+    daily_orders = daily_limit_result[0]["daily_orders"] if daily_limit_result else 0
+
+    if daily_orders >= 1:
+        logger.info(f"User with telegram_id={telegram_id} has reached their daily order limit.")
+        return {"error": "Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день."}
+
     # Insert the order
     query_create_order = """
         INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status)
         VALUES (%s, %s, %s, %s, %s)
         RETURNING order_id;
     """
-    print(datetime.now(astana_tz))
-    return await db_execute(query_create_order, params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending"), fetch=True)
+    try:
+        result = await db_execute(
+            query_create_order,
+            params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending"),
+            fetch=True
+        )
+        return {"success": result}
+    except Exception as e:
+        logger.error(f"Error creating order for user_id={user_id}: {e}")
+        return {"error": "Failed to create order due to an internal error."}
 
 
 async def check_user_subscription(telegram_id):
@@ -208,8 +244,25 @@ async def handle_order_request(message: types.Message):
 
     # Проверка подписки
     if not user or not user["subscription_status"]:
-        await message.answer("У вас нет активной подписки 🥺\n"
-"Для её приобретения напишите администратору \n@tratatapara ✅")
+        await message.answer(
+            "У вас нет активной подписки 🥺\n"
+            "Для её приобретения напишите администратору \n@tratatapara ✅"
+        )
+        return
+
+    # Проверка на незавершенные заказы
+    unfinished_query = """
+        SELECT COUNT(*) AS unfinished_orders
+        FROM orders
+        JOIN users ON orders.user_id = users.user_id
+        WHERE users.telegram_id = %s
+          AND orders.is_finished = FALSE;
+    """
+    unfinished_result = await db_execute(unfinished_query, params=(str(telegram_id),), fetch=True)
+    unfinished_orders = unfinished_result[0]["unfinished_orders"] if unfinished_result else 0
+
+    if unfinished_orders > 0:
+        await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
         return
 
     # Проверка на лимит заказов
@@ -241,12 +294,11 @@ async def handle_order_request(message: types.Message):
         )
         await message.answer(
             "Для оформления заказа нам необходим ваш номер телефона ☎️\n\n"
-"Он будет использован для уточнения деталей ваших заказов 🤗\n\n"
-"Пожалуйста, нажмите кнопку ниже и разрешите доступ к номеру ✅.",
+            "Он будет использован для уточнения деталей ваших заказов 🤗\n\n"
+            "Пожалуйста, нажмите кнопку ниже и разрешите доступ к номеру ✅.",
             reply_markup=keyboard,
         )
         return
-
 
     # Получение списка кафе
     cafe_options = await retrieve_cafe_options()
@@ -255,6 +307,7 @@ async def handle_order_request(message: types.Message):
         return
 
     await show_cafe_selection(message)
+
 
 
 @dp.message(F.contact)
@@ -436,7 +489,6 @@ async def handle_add_comment_yes(callback_query: types.CallbackQuery):
     user_data[telegram_id]["awaiting_comment"] = True  # Установить флаг ожидания комментария
     await callback_query.answer()
 
-
 @dp.callback_query(F.data == "add_comment_no")
 async def handle_add_comment_no(callback_query: types.CallbackQuery):
     """Создать заказ без комментариев."""
@@ -448,9 +500,15 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
         return
 
     # Создать заказ без деталей
-    order = await create_order(telegram_id, order_data["cafe_id"], order_data["menu_id"])
-    if order:
-        order_id = order[0]["order_id"]
+    order_result = await create_order(telegram_id, order_data["cafe_id"], order_data["menu_id"])
+    
+    if "error" in order_result:
+        # Notify the user about the specific issue
+        await callback_query.answer(order_result["error"], show_alert=True)
+        return
+
+    if "success" in order_result:
+        order_id = order_result["success"][0]["order_id"]
         
         # Создаем клавиатуру с кнопкой "Отменить"
         cancel_keyboard = InlineKeyboardMarkup(
@@ -464,9 +522,8 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
             f"Ваш заказ #{order_id} успешно создан 🥳\nЖдем подтверждения от кофейни ⏰\nЕсли хотите отменить, нажмите кнопку ниже 🚫\n",
             reply_markup=cancel_keyboard
         )
-
     else:
-        await callback_query.edit("Произошла ошибка при создании заказа.", show_alert=True)
+        await callback_query.answer("Произошла ошибка при создании заказа.", show_alert=True)
 
 
 @dp.message(lambda message: user_data.get(message.from_user.id, {}).get("awaiting_comment"))
@@ -477,6 +534,23 @@ async def handle_order_comment(message: types.Message):
 
     if not order_data:
         await message.answer("Произошла ошибка. Попробуйте снова.")
+        return
+
+    # Проверка на незавершенные заказы
+    query_unfinished_orders = """
+        SELECT COUNT(*) AS unfinished_orders
+        FROM orders
+        JOIN users ON orders.user_id = users.user_id
+        WHERE users.telegram_id = %s
+          AND orders.is_finished = FALSE;
+    """
+    unfinished_result = await db_execute(query_unfinished_orders, params=(str(telegram_id),), fetch=True)
+    unfinished_orders = unfinished_result[0]["unfinished_orders"] if unfinished_result else 0
+
+    if unfinished_orders > 0:
+        await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
+        # Очистить данные пользователя
+        user_data.pop(telegram_id, None)
         return
 
     # Проверка на лимит заказов в день
@@ -518,9 +592,9 @@ async def handle_order_comment(message: types.Message):
     else:
         await message.answer("Произошла ошибка при создании заказа.")
 
-    
     # Очистить данные пользователя
     user_data.pop(telegram_id, None)
+
 
 
 async def create_order_with_details(telegram_id, cafe_id, menu_id, details):
@@ -570,7 +644,12 @@ async def cancel_order(callback_query: types.CallbackQuery):
             return
 
         # Если статус позволяет, отменяем заказ
-        update_query = "UPDATE orders SET status = 'canceled' WHERE order_id = %s;"
+        update_query = """
+        UPDATE orders 
+        SET status = 'canceled', is_finished = TRUE 
+        WHERE order_id = %s;
+        """
+
         await db_execute(update_query, params=(order_id,))
 
         # Уведомление пользователя об успешной отмене

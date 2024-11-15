@@ -238,7 +238,7 @@ async def monitor_order_status():
                     # Update the cancel_notified field to TRUE
                     update_query = """
                         UPDATE orders
-                        SET cancel_notified = TRUE
+                        SET cancel_notified = TRUE, is_finished - TRUE
                         WHERE order_id = %s;
                     """
                     await db_execute(update_query, params=(order_id,))
@@ -347,24 +347,41 @@ async def get_incoming_orders():
         WHERE o.cafe_id = %s AND o.status = 'pending';
     """
     return await db_execute(query, params=(cafe_id,), fetch=True)
-
-
 async def update_order_status(order_id, status):
-    """Update the status of an order."""
-    query = "SELECT status FROM orders WHERE order_id = %s;"
-    result = await db_execute(query, params=(order_id,), fetch=True)
+    """Update the status of an order and set is_finished if necessary."""
+    # Check the current status of the order
+    query_check_status = "SELECT status FROM orders WHERE order_id = %s;"
+    result = await db_execute(query_check_status, params=(order_id,), fetch=True)
     
     if not result:
         logger.warning(f"Заказ с ID {order_id} не найден.")
-        return False  # Заказ не найден
+        return False  # Order not found
 
-    if result[0]['status'] in ['canceled', 'выдан']:
+    current_status = result[0]['status']
+    if current_status in ['canceled', 'выдан']:
         logger.warning(f"Попытка изменить статус отменённого или выданного заказа #{order_id}")
-        return False  # Запрещаем изменение статуса
+        return False  # Prohibit status changes for finished orders
 
-    query = "UPDATE orders SET status = %s WHERE order_id = %s;"
-    await db_execute(query, params=(status, order_id))
-    return True
+    # Determine if is_finished should be set to TRUE
+    if status in ['canceled', 'выдан']:
+        query_update_status = """
+            UPDATE orders
+            SET status = %s, is_finished = TRUE
+            WHERE order_id = %s;
+        """
+    else:
+        query_update_status = """
+            UPDATE orders
+            SET status = %s
+            WHERE order_id = %s;
+        """
+    
+    try:
+        await db_execute(query_update_status, params=(status, order_id))
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении статуса заказа #{order_id}: {e}")
+        return False
 
 
 
@@ -428,7 +445,7 @@ async def handle_cafe_cancel_order(callback_query: CallbackQuery):
         # Отменяем заказ
         update_query = """
                         UPDATE orders
-                        SET status = 'canceled', cancel_notified = TRUE
+                        SET status = 'canceled', cancel_notified = TRUE, is_finished = TRUE
                         WHERE order_id = %s;
                     """
         await db_execute(update_query, params=(order_id,))
