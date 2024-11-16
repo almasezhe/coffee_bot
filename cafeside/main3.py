@@ -249,8 +249,8 @@ async def monitor_order_status():
                         """
                         await db_execute(update_query, params=(order_id,))
 
-                    except exceptions.MessageNotModified:
-                        logger.info(f"Message {message_id} is already up-to-date")
+                    except exceptions.TelegramAPIError as e:
+                        logger.info(f"Message {message_id} is already up-to-date : {e}")
                     except Exception as e:
                         logger.error(f"Error while editing message: {e}")
 
