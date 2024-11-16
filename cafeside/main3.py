@@ -223,6 +223,7 @@ async def monitor_order_status():
 
                 # Если заказ завершен, удаляем его из кэша
                 if is_finished and message_id in message_cache:
+                    logger.info(f"Удаляем из кэша завершенный заказ message_id={message_id}.")
                     del message_cache[message_id]
                     continue  # Пропускаем обработку завершенного заказа
 
@@ -240,6 +241,9 @@ async def monitor_order_status():
                 if cafe_chat_id and message_id:
                     # Проверяем, есть ли сообщение в кэше и совпадает ли текст
                     cached_text = message_cache.get(message_id)
+                    logger.info(f"Кэш для message_id={message_id}: {cached_text}")
+                    logger.info(f"Новый текст для message_id={message_id}: {message_text}")
+
                     if cached_text == message_text:
                         logger.info(f"Текст для message_id={message_id} не изменился, пропускаем редактирование.")
                         continue  # Если текст совпадает, пропускаем редактирование
