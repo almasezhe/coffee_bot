@@ -188,7 +188,7 @@ async def handle_new_menu_item(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# Создаем кэш для хранения сообщений
+# Кэш для хранения текста сообщений
 message_cache = {}
 
 async def monitor_order_status():
@@ -207,7 +207,8 @@ async def monitor_order_status():
                     m.coffee_name, 
                     u.username, 
                     u.phone_number, 
-                    o.cafe_id
+                    o.cafe_id,
+                    o.is_finished
                 FROM orders o
                 JOIN menu m ON o.menu_id = m.menu_id
                 JOIN users u ON o.user_id = u.user_id
@@ -218,11 +219,17 @@ async def monitor_order_status():
             for order in canceled_orders:
                 order_id = order["order_id"]
                 message_id = order["message_id"]
+                is_finished = order["is_finished"]
 
-                # Retrieve cafe chat_id
+                # Если заказ завершен, удаляем его из кэша
+                if is_finished and message_id in message_cache:
+                    del message_cache[message_id]
+                    continue  # Пропускаем обработку завершенного заказа
+
+                # Получаем ID чата кафе
                 cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                # Formulate the cancellation message
+                # Формируем текст сообщения
                 message_text = (
                     f"🔴 Заказ №{order_id} был отменён🔴\n"
                     f"Клиент: {order['username']} \nНомер: {order['phone_number']}\n"
@@ -232,31 +239,36 @@ async def monitor_order_status():
 
                 if cafe_chat_id and message_id:
                     # Проверяем, есть ли сообщение в кэше и совпадает ли текст
-                    if message_id in message_cache and message_cache[message_id] == message_text:
+                    cached_text = message_cache.get(message_id)
+                    if cached_text == message_text:
+                        logger.info(f"Текст для message_id={message_id} не изменился, пропускаем редактирование.")
                         continue  # Если текст совпадает, пропускаем редактирование
                     
-                    # Обновляем сообщение
-                    await bot.edit_message_text(
-                        chat_id=cafe_chat_id,
-                        message_id=message_id,
-                        text=message_text,
-                    )
+                    # Выполняем редактирование сообщения
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=cafe_chat_id,
+                            message_id=message_id,
+                            text=message_text,
+                        )
+                        # Обновляем кэш
+                        message_cache[message_id] = message_text
 
-                    # Сохраняем новый текст сообщения в кэш
-                    message_cache[message_id] = message_text
-
-                    # Обновляем статус уведомления в базе данных
-                    update_query = """
-                        UPDATE orders
-                        SET cancel_notified = TRUE, is_finished = TRUE
-                        WHERE order_id = %s;
-                    """
-                    await db_execute(update_query, params=(order_id,))
+                        # Обновляем статус уведомления в базе данных
+                        update_query = """
+                            UPDATE orders
+                            SET cancel_notified = TRUE, is_finished = TRUE
+                            WHERE order_id = %s;
+                        """
+                        await db_execute(update_query, params=(order_id,))
+                        logger.info(f"Сообщение message_id={message_id} успешно обновлено.")
+                    except Exception as edit_error:
+                        logger.error(f"Ошибка при редактировании сообщения message_id={message_id}: {edit_error}")
 
         except Exception as e:
-            logger.error(f"Error in monitor_order_status: {e}")
+            logger.error(f"Ошибка в monitor_order_status: {e}")
 
-        await asyncio.sleep(4)  # Wait before checking for canceled orders again
+        await asyncio.sleep(4)  # Ждем перед следующей проверкой
 
 
 

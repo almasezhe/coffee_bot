@@ -644,7 +644,7 @@ async def cancel_order(callback_query: types.CallbackQuery):
         # Если статус позволяет, отменяем заказ
         update_query = """
         UPDATE orders 
-        SET status = 'canceled', is_finished = TRUE 
+        SET status = 'canceled'
         WHERE order_id = %s;
         """
 
