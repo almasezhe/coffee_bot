@@ -238,7 +238,7 @@ async def monitor_order_status():
                     # Update the cancel_notified field to TRUE
                     update_query = """
                         UPDATE orders
-                        SET cancel_notified = TRUE, is_finished - TRUE
+                        SET cancel_notified = TRUE, is_finished = TRUE
                         WHERE order_id = %s;
                     """
                     await db_execute(update_query, params=(order_id,))
