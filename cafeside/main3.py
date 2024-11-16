@@ -758,13 +758,29 @@ async def main():
     global db_connection
     db_connection = psycopg2.connect(DB_URL)
 
-    # Запускаем мониторинг заказов
-    asyncio.create_task(monitor_order_status())
+    # Запускаем мониторинг заказов и автообработку в отдельных задачах
+    monitor_task = asyncio.create_task(monitor_order_status())
     asyncio.create_task(auto_push_new_orders())
     logger.info("Бот для кафе запущен и готов к работе")
-    await dp.start_polling(bot)
 
+    # Ожидаем результат monitor_order_status
+    result = await monitor_task
+    if result is None:
+        # Обработка случая, когда результат — None
+        raise ValueError("monitor_order_status вернула None")
+
+    for item in result:
+        # Работаем с item
+        process_item(item)  # Замени на свою логику обработки
+
+    await dp.start_polling(bot)
     db_connection.close()
+
+# Не забудь определить process_item, если его ещё нет
+def process_item(item):
+    # Логика обработки item
+    logger.info(f"Обрабатываем элемент: {item}")
+
 
 
 
