@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeybo
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import re
-from aiogram import exceptions
+
 from aiogram import Router, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
@@ -188,6 +188,9 @@ async def handle_new_menu_item(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+# Создаем кэш для хранения сообщений
+message_cache = {}
+
 async def monitor_order_status():
     """Monitor the database for canceled orders and notify admins and cafes."""
     while True:
@@ -227,37 +230,35 @@ async def monitor_order_status():
                     f"Дата заказа: {order['order_date']}"
                 )
 
-                # Update the existing message if message_id is available
                 if cafe_chat_id and message_id:
-                    try:
-                        # Retrieve the current message text to check if it has changed
-                        current_message = await bot.get_message(chat_id=cafe_chat_id, message_id=message_id)
+                    # Проверяем, есть ли сообщение в кэше и совпадает ли текст
+                    if message_id in message_cache and message_cache[message_id] == message_text:
+                        continue  # Если текст совпадает, пропускаем редактирование
+                    
+                    # Обновляем сообщение
+                    await bot.edit_message_text(
+                        chat_id=cafe_chat_id,
+                        message_id=message_id,
+                        text=message_text,
+                    )
 
-                        # Check if the text is the same before updating
-                        if current_message.text != message_text:
-                            await bot.edit_message_text(
-                                chat_id=cafe_chat_id,
-                                message_id=message_id,
-                                text=message_text,
-                            )
+                    # Сохраняем новый текст сообщения в кэш
+                    message_cache[message_id] = message_text
 
-                        # Update the cancel_notified field to TRUE
-                        update_query = """
-                            UPDATE orders
-                            SET cancel_notified = TRUE, is_finished = TRUE
-                            WHERE order_id = %s;
-                        """
-                        await db_execute(update_query, params=(order_id,))
+                    # Обновляем статус уведомления в базе данных
+                    update_query = """
+                        UPDATE orders
+                        SET cancel_notified = TRUE, is_finished = TRUE
+                        WHERE order_id = %s;
+                    """
+                    await db_execute(update_query, params=(order_id,))
 
-                    except exceptions.TelegramAPIError as e:
-                        logger.info(f"Message {message_id} is already up-to-date : {e}")
-                    except Exception as e:
-                        logger.error(f"Error while editing message: {e}")
-
-
-                    await asyncio.sleep(4)  # Wait before checking for canceled orders again
         except Exception as e:
             logger.error(f"Error in monitor_order_status: {e}")
+
+        await asyncio.sleep(4)  # Wait before checking for canceled orders again
+
+
 
 
 
