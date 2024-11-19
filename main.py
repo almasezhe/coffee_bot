@@ -73,7 +73,7 @@ async def retrieve_menu(cafe_id):
     return await db_execute(query, params=(cafe_id,), fetch=True)
 
 
-async def create_order(telegram_id, cafe_id, menu_id):
+async def create_order(telegram_id, cafe_id, menu_id,take_out):
     # Fetch the user_id using telegram_id
     query_get_user_id = "SELECT user_id FROM users WHERE telegram_id = %s;"
     user = await db_execute(query_get_user_id, params=(str(telegram_id),), fetch=True)  # Cast telegram_id to string
@@ -115,20 +115,47 @@ async def create_order(telegram_id, cafe_id, menu_id):
 
     # Insert the order
     query_create_order = """
-        INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status,take_out)
+        VALUES (%s, %s, %s, %s, %s,%s)
         RETURNING order_id;
     """
     try:
         result = await db_execute(
             query_create_order,
-            params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending"),
+            params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending",take_out),
             fetch=True
         )
         return {"success": result}
     except Exception as e:
         logger.error(f"Error creating order for user_id={user_id}: {e}")
         return {"error": "Failed to create order due to an internal error."}
+
+
+async def get_order_by_id(order_id):
+    """Получить информацию о заказе по его order_id."""
+    query = """
+SELECT 
+    o.order_id,
+    o.user_id,
+    o.menu_id,
+    o.order_date,
+    o.status,
+    o.details,
+    o.take_out, -- Добавляем колонку take_out
+    m.coffee_name,
+    u.username,
+    u.phone_number,
+    c.cafe_tg
+FROM orders o
+JOIN menu m ON o.menu_id = m.menu_id
+JOIN users u ON o.user_id = u.user_id
+JOIN cafes c ON o.cafe_id = c.cafe_id
+WHERE o.order_id = %s;
+
+    """
+    result = await db_execute(query, params=(order_id,), fetch=True)
+    print("DEBUG:", result)
+    return result[0] if result else None
 
 
 async def check_user_subscription(telegram_id):
@@ -191,7 +218,9 @@ async def display_subscription_status(message: types.Message):
 async def send_message_and_menu_buttons(message, reply_message, buttons_names):
     keyboard = [[KeyboardButton(text=name)] for name in buttons_names]
     menu = ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await message.answer(reply_message, reply_markup=menu)
+    reply_message= await message.answer(reply_message, reply_markup=menu)
+    asyncio.create_task(delete_message_after_timeout(reply_message, 4000)) 
+
 
 
 ### User Interaction ###
@@ -209,17 +238,19 @@ async def start(message: types.Message):
     if username:  # Если username существует
         await register_user(telegram_id, username)
         if first_name:  # Если имя указано
-            await message.answer(
+            greeting=await message.answer(
                 f"Привет, {first_name} 🥳\nДобро пожаловать в Refill - сервис подписки на кофе 🤗"
             )
         else:  # Если имя отсутствует, приветствуем по username
-            await message.answer(
+            greeting=await message.answer(
                 f"Привет, {username} 🥳\nДобро пожаловать в Refill - сервис подписки на кофе 🤗"
             )
     else:  # Если username отсутствует
-        await message.answer(
+        greeting=await message.answer(
             "У вас нет установленного username в Telegram. Пожалуйста, установите его в настройках Telegram."
         )
+    asyncio.create_task(delete_message_after_timeout(greeting, 4000)) 
+
     users_row = await check_user_subscription(telegram_id)
     if users_row:
         await display_subscription_status(message)
@@ -242,10 +273,12 @@ async def handle_order_request(message: types.Message):
 
     # Проверка подписки
     if not user or not user["subscription_status"]:
-        await message.answer(
+        subs=await message.answer(
             "У вас нет активной подписки 🥺\n"
             "Для её приобретения напишите администратору \n@tratatapara ✅"
         )
+        asyncio.create_task(delete_message_after_timeout(subs, 4000)) 
+
         return
 
     # Проверка на незавершенные заказы
@@ -260,7 +293,9 @@ async def handle_order_request(message: types.Message):
     unfinished_orders = unfinished_result[0]["unfinished_orders"] if unfinished_result else 0
 
     if unfinished_orders > 0:
-        await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
+        unfinish=await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
+        asyncio.create_task(delete_message_after_timeout(unfinish, 4000)) 
+
         return
 
     # Проверка на лимит заказов
@@ -276,7 +311,9 @@ async def handle_order_request(message: types.Message):
     daily_orders = result[0]["daily_orders"] if result else 0
 
     if daily_orders >= 1:
-        await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        daily=await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        asyncio.create_task(delete_message_after_timeout(daily, 4000)) 
+
         return
 
     # Проверка наличия номера телефона у пользователя
@@ -290,18 +327,21 @@ async def handle_order_request(message: types.Message):
             resize_keyboard=True,
             one_time_keyboard=True
         )
-        await message.answer(
+        phone=await message.answer(
             "Для оформления заказа нам необходим ваш номер телефона ☎️\n\n"
             "Он будет использован для уточнения деталей ваших заказов 🤗\n\n"
             "Пожалуйста, нажмите кнопку ниже и разрешите доступ к номеру ✅.",
             reply_markup=keyboard,
         )
+        asyncio.create_task(delete_message_after_timeout(phone, 4000)) 
+
         return
 
     # Получение списка кафе
     cafe_options = await retrieve_cafe_options()
     if not cafe_options:
-        await message.answer("К сожалению, сейчас нет доступных кафе.")
+        not_dostup_kafe=await message.answer("К сожалению, сейчас нет доступных кафе.")
+        asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000)) 
         return
 
     await show_cafe_selection(message)
@@ -326,8 +366,8 @@ async def handle_phone_number(message: types.Message):
         resize_keyboard=True,  # Уменьшает размер кнопки
         one_time_keyboard=False  # Скрывает клавиатуру после нажатия
     )
-    await message.answer("Ваш номер телефона успешно сохранён ✅\n\n"
-    "Теперь вы можете оформить заказ 🥳", reply_markup=keyboard)
+    oform=await message.answer("Ваш номер телефона успешно сохранён ✅\n\n""Теперь вы можете оформить заказ 🥳", reply_markup=keyboard)
+    asyncio.create_task(delete_message_after_timeout(oform, 4000)) 
     await handle_order_request(message)  # Перезапускаем процесс оформления заказа
 
 
@@ -343,11 +383,13 @@ async def handle_decline_phone_request(message: types.Message):
         one_time_keyboard=False  # Скрывает клавиатуру после нажатия
     )
     """Обрабатываем отказ от предоставления номера телефона."""
-    await message.answer("Вы отказались предоставить номер телефона 😔\n\n"
-    "Вы можете оформить заказ и без него ✅",reply_markup=keyboard)
+    otkaz=await message.answer("Вы отказались предоставить номер телефона 😔\n\n""Вы можете оформить заказ и без него ✅",reply_markup=keyboard)
+    asyncio.create_task(delete_message_after_timeout(otkaz, 4000)) 
+
     cafe_options = await retrieve_cafe_options()
     if not cafe_options:
-        await message.answer("К сожалению, сейчас нет доступных кафе.")
+        not_dostup_kafe=await message.answer("К сожалению, сейчас нет доступных кафе.")
+        asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000)) 
         return
 
     await show_cafe_selection(message)
@@ -356,7 +398,8 @@ async def handle_decline_phone_request(message: types.Message):
 async def show_cafe_selection(message, page=0):
     global cafe_options
     if not cafe_options:
-        await message.answer("Нет доступных заведений.")
+        not_dostup_kafe=await message.answer("Нет доступных заведений.")
+        asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000)) 
         return
 
     buttons = []
@@ -380,9 +423,12 @@ async def show_cafe_selection(message, page=0):
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     try:
-        await message.edit_text("Выберите кофейню 👇:", reply_markup=keyboard)
+        kafe_choose=await message.edit_text("Выберите кофейню 👇:", reply_markup=keyboard)
+        asyncio.create_task(delete_message_after_timeout(kafe_choose, 4000)) 
     except aiogram.exceptions.TelegramBadRequest:
-        await message.answer("Выберите кофейню 👇:", reply_markup=keyboard)
+        kafe_choose=await message.answer("Выберите кофейню 👇:", reply_markup=keyboard)
+        asyncio.create_task(delete_message_after_timeout(kafe_choose, 4000)) 
+
 
 
 @dp.callback_query(F.data.startswith("cafe_"))
@@ -434,9 +480,11 @@ async def show_coffee_selection(message, cafe_id, page=0):
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     try:
-        await message.edit_text("Выберите кофе 👇:", reply_markup=keyboard)
+        cofe=await message.edit_text("Выберите кофе 👇:", reply_markup=keyboard)
+        asyncio.create_task(delete_message_after_timeout(cofe, 4000))
     except aiogram.exceptions.TelegramBadRequest:
-        await message.answer("Выберите кофе 👇:", reply_markup=keyboard)
+        cofe=await message.answer("Выберите кофе 👇:", reply_markup=keyboard)
+        asyncio.create_task(delete_message_after_timeout(cofe, 4000))
 
 
 
@@ -465,18 +513,79 @@ async def handle_coffee_selection(callback_query: types.CallbackQuery):
         # Запросить комментарий к заказу
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Да", callback_data="add_comment_yes")],
-                [InlineKeyboardButton(text="Нет", callback_data="add_comment_no")]
+                [InlineKeyboardButton(text="С собой", callback_data="at_cafe")],
+                [InlineKeyboardButton(text="На вынос", callback_data="take_out")]
             ]
         )
-        await callback_query.message.edit_text(
-            f"Вы выбрали {selected_coffee['coffee_name']}✅\nХотите добавить комментарии к заказу?\n(например, сироп, сахар и т.д.)",
+        chosed=await callback_query.message.edit_text(
+            f"Вы выбрали {selected_coffee['coffee_name']}✅\nКофе с собой или на вынос?\n",
             reply_markup=keyboard
         )
         await callback_query.answer()
+        asyncio.create_task(delete_message_after_timeout(chosed, 4000))
     except Exception as e:
         logger.error(f"Ошибка обработки выбора кофе: {e}")
         await callback_query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+
+
+@dp.callback_query(F.data == "at_cafe")
+async def handle_at_cafe(callback_query: types.CallbackQuery):
+    """Обработка выбора 'В кафе'."""
+    telegram_id = callback_query.from_user.id
+    order_data = user_data.get(telegram_id, {})
+
+    if not order_data:
+        await callback_query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+        return
+
+    # Сохранить выбор "В кафе" в user_data
+    order_data["take_out"] = "В кафе"
+    user_data[telegram_id] = order_data
+
+    # Предложить добавить комментарии
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Добавить комментарий", callback_data="add_comment_yes")],
+            [InlineKeyboardButton(text="Без комментариев", callback_data="add_comment_no")]
+        ]
+    )
+
+    await callback_query.message.edit_text(
+        "Вы выбрали: В кафе 🏠\n"
+        "Хотите добавить комментарии к заказу? (например, добавить сироп, сахар и т.д.)",
+        reply_markup=keyboard
+    )
+    await callback_query.answer("Вы выбрали 'В кафе'.")
+
+@dp.callback_query(F.data == "take_out")
+async def handle_take_out(callback_query: types.CallbackQuery):
+    """Обработка выбора 'На вынос'."""
+    telegram_id = callback_query.from_user.id
+    order_data = user_data.get(telegram_id, {})
+
+    if not order_data:
+        await callback_query.answer("Произошла ошибка. Попробуйте снова.", show_alert=True)
+        return
+
+    # Сохранить выбор "На вынос" в user_data
+    order_data["take_out"] = "На вынос"
+    user_data[telegram_id] = order_data
+
+    # Предложить добавить комментарии
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Добавить комментарий", callback_data="add_comment_yes")],
+            [InlineKeyboardButton(text="Без комментариев", callback_data="add_comment_no")]
+        ]
+    )
+
+    await callback_query.message.edit_text(
+        "Вы выбрали: На вынос 🚶‍♂️\n"
+        "Хотите добавить комментарии к заказу? (например, добавить сироп, сахар и т.д.)",
+        reply_markup=keyboard
+    )
+    await callback_query.answer("Вы выбрали 'На вынос'.")
+
 
 
 @dp.callback_query(F.data == "add_comment_yes")
@@ -486,6 +595,7 @@ async def handle_add_comment_yes(callback_query: types.CallbackQuery):
     await callback_query.message.answer("Пожалуйста, отправьте сообщение с комментариями к вашему заказу (например, добавить сироп, сахар и т.д.).",reply_markup=None)
     user_data[telegram_id]["awaiting_comment"] = True  # Установить флаг ожидания комментария
     await callback_query.answer()
+
 
 @dp.callback_query(F.data == "add_comment_no")
 async def handle_add_comment_no(callback_query: types.CallbackQuery):
@@ -498,8 +608,7 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
         return
 
     # Создать заказ без деталей
-    order_result = await create_order(telegram_id, order_data["cafe_id"], order_data["menu_id"])
-    
+    order_result = await create_order(telegram_id, order_data["cafe_id"], order_data["menu_id"],order_data["take_out"])
     if "error" in order_result:
         # Notify the user about the specific issue
         await callback_query.answer(order_result["error"], show_alert=True)
@@ -515,15 +624,39 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
             ]
         )
         asyncio.create_task(monitor_order_status(telegram_id))
+        order_details= await get_order_by_id(order_id)
 
         await callback_query.message.edit_text(
-            f"Ваш заказ #{order_id} успешно создан 🥳\nЖдем подтверждения от кофейни ⏰\nЕсли хотите отменить, нажмите кнопку ниже 🚫\n",
+            f"Ваш заказ #{order_id} успешно создан 🥳\n\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Контакты кафе: {order_details['cafe_tg']}\n"
+            f"{order_details['take_out']}\n\n"
+            f"Ждем подтверждения от кофейни ⏰\n"
+            f"Если хотите отменить заказ, подождите 3 секунды"
+        )
+        await asyncio.sleep(3)
+        cancel_message=await callback_query.message.edit_text(
+            f"Ваш заказ #{order_id} успешно создан 🥳\n\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Контакты кафе: {order_details['cafe_tg']}\n"
+            f"{order_details['take_out']}\n\n"
+            f"Ждем подтверждения от кофейни ⏰\n"
+            f"Если хотите отменить, нажмите на кнопку снизу 🚫\n",
             reply_markup=cancel_keyboard
         )
+        asyncio.create_task(delete_message_after_timeout(cancel_message, 4000))
+
     else:
         await callback_query.answer("Произошла ошибка при создании заказа.", show_alert=True)
-
-
+async def delete_message_after_timeout(message, timeout: int):
+    print("Start deleting")
+    """Удалить сообщение через заданное время."""
+    await asyncio.sleep(timeout)
+    try:
+        await message.delete()
+    except Exception as e:
+        # Игнорируем ошибки (например, если сообщение уже удалено)
+        print(f"Ошибка при удалении сообщения: {e}")
 @dp.message(lambda message: user_data.get(message.from_user.id, {}).get("awaiting_comment"))
 async def handle_order_comment(message: types.Message):
     """Обработать комментарий пользователя и создать заказ."""
@@ -546,7 +679,8 @@ async def handle_order_comment(message: types.Message):
     unfinished_orders = unfinished_result[0]["unfinished_orders"] if unfinished_result else 0
 
     if unfinished_orders > 0:
-        await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
+        unfinish=await message.answer("У вас есть незавершенный заказ. Завершите его, прежде чем оформлять новый.")
+        asyncio.create_task(delete_message_after_timeout(unfinish, 4000))
         # Очистить данные пользователя
         user_data.pop(telegram_id, None)
         return
@@ -564,38 +698,52 @@ async def handle_order_comment(message: types.Message):
     daily_orders = result[0]["daily_orders"] if result else 0
 
     if daily_orders >= 1:
-        await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        already=await message.answer("Вы уже сделали заказ сегодня. Подписка позволяет заказывать 1 кофе в день.")
+        asyncio.create_task(delete_message_after_timeout(already, 4000))
         # Очистить данные пользователя
         user_data.pop(telegram_id, None)
         return
 
     # Создать заказ с деталями
     comment = message.text
-    order = await create_order_with_details(telegram_id, order_data["cafe_id"], order_data["menu_id"], comment)
+    order = await create_order_with_details(telegram_id, order_data["cafe_id"], order_data["menu_id"], comment, order_data["take_out"])
     if order:
         order_id = order[0]["order_id"]
         
-        # Создаем клавиатуру с кнопкой "Отменить"
+        # Создаём клавиатуру с кнопкой "Отменить"
         cancel_keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel_order_{order_id}")]
             ]
         )
-        asyncio.create_task(monitor_order_status(telegram_id))
 
-        await message.answer(
-            f"Ваш заказ #{order_id} успешно создан 🥳\nЖдем подтверждения от кофейни ⏰\nЕсли хотите отменить, нажмите кнопку ниже 🚫\n",
+        asyncio.create_task(monitor_order_status(telegram_id))
+        order_details = await get_order_by_id(order_id)
+
+        # Отправляем первое сообщение без кнопки
+        order_confirmed_message=await message.answer(
+            f"Ваш заказ #{order_id} успешно создан 🥳\n\n"
+            f"Напиток: {order_details['coffee_name']}\n"
+            f"Контакты кафе: {order_details['cafe_tg']}\n"
+            f"{order_details['take_out']}\n\n"
+            f"Ждем подтверждения от кофейни ⏰\n"
+            f"Если хотите отменить заказ, подождите 3 секунды"
+        )
+        asyncio.create_task(delete_message_after_timeout(order_confirmed_message, 4000)) 
+
+        # Ждём 3 секунды
+        await asyncio.sleep(3)
+
+        # Отправляем сообщение с кнопкой "Отменить заказ"
+        cancel_message=await message.answer(
+            f"Если хотите отменить, нажмите на кнопку снизу 🚫\n",
             reply_markup=cancel_keyboard
         )
-    else:
-        await message.answer("Произошла ошибка при создании заказа.")
-
-    # Очистить данные пользователя
-    user_data.pop(telegram_id, None)
+        asyncio.create_task(delete_message_after_timeout(cancel_message, 4000)) 
 
 
 
-async def create_order_with_details(telegram_id, cafe_id, menu_id, details):
+async def create_order_with_details(telegram_id, cafe_id, menu_id, details,take_out):
     """Создание заказа с комментариями."""
     query_get_user_id = "SELECT user_id FROM users WHERE telegram_id = %s;"
     user = await db_execute(query_get_user_id, params=(str(telegram_id),), fetch=True)
@@ -607,12 +755,12 @@ async def create_order_with_details(telegram_id, cafe_id, menu_id, details):
     user_id = user[0]["user_id"]
 
     query_create_order = """
-        INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status, details)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO orders (user_id, cafe_id, menu_id, order_date, status, details,take_out)
+        VALUES (%s, %s, %s, %s, %s, %s,%s)
         RETURNING order_id;
     """
     
-    return await db_execute(query_create_order, params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending", details), fetch=True)
+    return await db_execute(query_create_order, params=(user_id, cafe_id, menu_id, datetime.now(astana_tz), "pending", details,take_out), fetch=True)
 
 
 @dp.callback_query(F.data.startswith("cancel_order_"))
@@ -834,13 +982,15 @@ async def monitor_subscription_updates():
             # Если уведомление еще не отправлено
             if not subscription_notified:
                 try:
-                    await bot.send_message(
+                    sub_on=await bot.send_message(
                         chat_id=telegram_id,
                         text="Поздравляем, вы приобрели подписку Refill 🎉\n\nДобро пожаловать в сервис, где заботятся о тех кто любит кофе 🤗\n\nПриятного использования 🫶"
                     )
                     # Обновляем флаг уведомления в базе данных
                     update_query = "UPDATE users SET subscription_notified = TRUE WHERE user_id = %s;"
                     await db_execute(update_query, params=(user_id,))
+                    asyncio.create_task(delete_message_after_timeout(sub_on, 4000))
+
                 except Exception as e:
                     logger.error(f"Ошибка при отправке сообщения пользователю {telegram_id}: {e}")
 
@@ -856,10 +1006,11 @@ async def monitor_subscription_updates():
                     await db_execute(update_query, params=(user_id,))
 
                     # Уведомляем пользователя об окончании подписки
-                    await bot.send_message(
+                    passed=await bot.send_message(
                         chat_id=telegram_id,
                         text="Ваша подписка истекла. Подпишитесь снова, чтобы продолжить пользоваться услугами. 😊"
                     )
+                    asyncio.create_task(delete_message_after_timeout(passed, 4000)) 
                 except Exception as e:
                     logger.error(f"Ошибка при обновлении подписки пользователя {telegram_id}: {e}")
 

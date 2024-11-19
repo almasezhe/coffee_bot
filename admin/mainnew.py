@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 # API Key and Database URL
 API_KEY = "7696239640:AAElC7D2Hi0slgJg6CkJFSgCILUG5hWWXBE"
 DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-
+DB_URL = "postgresql://postgres.xerkmpqjygwvwzgiysep:23147513Faq!@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+API_KEY="1837579397:AAHPxib-LpGdTOiui7yO9Y1seseGzOLQcRI"#DAMIRO UDALYATOR
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
 astana_tz = timezone(timedelta(hours=5))

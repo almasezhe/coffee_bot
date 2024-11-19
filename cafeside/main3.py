@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # Load your API key and database URL
 API_KEY = "7537071518:AAE2fDi3HoOT4p8RNmptqzwwEOgXUDdhoZw"
 DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-
 # FSM States
 class MenuState(StatesGroup):
     waiting_for_new_item = State()
@@ -233,7 +232,7 @@ async def monitor_order_status():
                 # Формируем текст сообщения
                 message_text = (
                     f"🔴 Заказ №{order_id} был отменён🔴\n"
-                    f"Клиент: {order['username']} \nНомер: {order['phone_number']}\n"
+                    f"Клиент: @{order['username']} \nНомер: {order['phone_number']}\n"
                     f"Напиток: {order['coffee_name']}\n"
                     f"Дата заказа: {order['order_date']}"
                 )
@@ -368,7 +367,7 @@ async def next_page(callback_query: types.CallbackQuery):
 async def get_incoming_orders():
     """Retrieve incoming orders for the current cafe."""
     query = """
-        SELECT o.order_id, o.user_id, u.username, o.menu_id, o.order_date, o.status, m.coffee_name, u.phone_number
+        SELECT o.order_id, o.user_id, u.username, o.menu_id, o.order_date, o.status, m.coffee_name, u.phone_number,o.take_out
         FROM orders o
         JOIN menu m ON o.menu_id = m.menu_id
         JOIN users u ON o.user_id = u.user_id
@@ -437,6 +436,7 @@ async def show_orders_callback(callback_query: CallbackQuery):
             f"Клиент: @{order['username']}\n"
             f"Номер: {order.get('phone_number', 'Нет номера')}\n"
             f"Напиток: {order['coffee_name']}\n"
+            f"{order['take_out']}\n"
             f"Комментарий: {order['details']}\n",
             reply_markup=keyboard,
         )
@@ -487,6 +487,7 @@ async def handle_cafe_cancel_order(callback_query: CallbackQuery):
         phone_number = order_details.get("phone_number", "Не указан")
         coffee_name = order_details.get("coffee_name", "Не указан")
         details = order_details.get("details", "Нет комментария")
+        take_out= order_details.get("take_out","Не указан")
         order_date = order_details.get("order_date", "Не указана")
         # Уведомление кафе
         await callback_query.message.edit_text(
@@ -494,6 +495,7 @@ async def handle_cafe_cancel_order(callback_query: CallbackQuery):
             f"Клиент: @{username}\n"
             f"Номер: {phone_number}\n"
             f"Напиток: {coffee_name}\n"
+            f"{take_out}\n"
             f"Комментарий: {details}\n"
             f"Дата заказа: {order_date}\n"
         )
@@ -531,6 +533,7 @@ async def accept_order(callback_query: types.CallbackQuery):
         f"Клиент: @{order['username']}\n"
         f"Номер: {order['phone_number']}\n"
         f"Напиток: {order['coffee_name']}\n"
+        f"{order['take_out']}\n"
         f"Комментарий: {order['details']}\n"
         f"Статус был обновлён на: готовится",
         reply_markup=keyboard
@@ -575,6 +578,7 @@ async def complete_order(callback_query: types.CallbackQuery):
             f"Клиент: @{order_details['username']}\n"
             f"Номер: {order_details['phone_number']}\n"
             f"Напиток: {order_details['coffee_name']}\n"
+            f"{order_details['take_out']}\n"
             f"Комментарий: {order_details['details']}\n"
             f"Статус был обновлён на: готов",
             reply_markup=keyboard
@@ -589,20 +593,24 @@ async def complete_order(callback_query: types.CallbackQuery):
 async def get_order_by_id(order_id):
     """Получить информацию о заказе по его order_id."""
     query = """
-        SELECT 
-            o.order_id, 
-            o.user_id, 
-            o.menu_id, 
-            o.order_date, 
-            o.status, 
-            o.details, 
-            m.coffee_name, 
-            u.username, 
-            u.phone_number
-        FROM orders o
-        JOIN menu m ON o.menu_id = m.menu_id
-        JOIN users u ON o.user_id = u.user_id
-        WHERE o.order_id = %s;
+SELECT 
+    o.order_id,
+    o.user_id,
+    o.menu_id,
+    o.order_date,
+    o.status,
+    o.details,
+    o.take_out, -- Добавляем колонку take_out
+    m.coffee_name,
+    u.username,
+    u.phone_number,
+    c.cafe_tg
+FROM orders o
+JOIN menu m ON o.menu_id = m.menu_id
+JOIN users u ON o.user_id = u.user_id
+JOIN cafes c ON o.cafe_id = c.cafe_id
+WHERE o.order_id = %s;
+
     """
     result = await db_execute(query, params=(order_id,), fetch=True)
     print("DEBUG:", result)
@@ -643,6 +651,7 @@ async def generate_otp_code(callback_query: types.CallbackQuery):
             f"Клиент: @{order_details['username']}\n"
             f"Номер: {order_details['phone_number']}\n"
             f"Напиток: {order_details['coffee_name']}\n"
+            f"{order_details['take_out']}\n"
             f"Комментарий: {order_details['details']}\n"
             f"⭕️ OTP-код для клиента : {otp_code} ⭕️\n"
             f"Если код совпадает, подтвердите выдачу.",
@@ -683,6 +692,7 @@ async def confirm_order_issued(callback_query: types.CallbackQuery):
             f"Клиент: @{order_details['username']}\n"
             f"Номер: {order_details['phone_number']}\n"
             f"Напиток: {order_details['coffee_name']}\n"
+            f"{order_details['take_out']}\n"
             f"Комментарий: {order_details['details']}\n"
             f"Дата заказа: {order_details['order_date']}",
         )
@@ -702,7 +712,7 @@ async def auto_push_new_orders():
         try:
             # Query to get pending orders
             query = """
-                SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details, u.phone_number, o.order_date
+                SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details, u.phone_number, o.order_date, o.take_out
                 FROM orders o
                 JOIN menu m ON o.menu_id = m.menu_id
                 JOIN users u ON o.user_id = u.user_id
@@ -731,6 +741,7 @@ async def auto_push_new_orders():
                     f"Клиент: @{order['username']}\n"
                     f"Номер: {order.get('phone_number', 'Нет номера')}\n"
                     f"Напиток: {order['coffee_name']}\n"
+                    f"{order['take_out']}\n"
                     f"Комментарий: {order['details']}\n"
                 )
 
