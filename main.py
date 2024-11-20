@@ -191,7 +191,15 @@ async def get_user_latest_order(user_id):
 async def display_subscription_status(message: types.Message):
     if not users_row["subscription_status"]:
         reply_message = (
-"У вас еще нет подписки 🥺 \n\nДля приобретения напишите администратору @tratatapara ✍️\n\nПо подписке вы получите 30 кофе в месяц во всех партнерских кофейнях ☕️\n\nГде вы можете использовать свою подписку? ✅: \n\n- Coffee Moose | Мангилик ел 56 \nhttps://2gis.kz/astana/geo/70000001090408124\n\n- Coffee Moose | Айнаколь 66\nhttps://2gis.kz/astana/geo/70000001094220075\n\n- Coffee Original | Республика 27\nhttps://2gis.kz/astana/geo/70000001075322780\n\n- EspressoDay | Назарбаев Университет (доступен только студентам НУ и персоналу НУ)\nhttps://2gis.kz/astana/branches/70000001075103852/firm/70000001080140646/71.395796%2C51.090729?m=71.397718%2C51.092483%2F15.29\n\nПишите скорее нашему администратору @tratatapara, и мы позаботимся о вашем комфорте в каждой выпитой чашке кофе 🫶",
+            "У вас еще нет подписки 🥺 \n\nДля приобретения напишите администратору @tratatapara ✍️\n\n"
+            "По подписке вы получите 30 кофе в месяц во всех партнерских кофейнях ☕️\n\n"
+            "Где вы можете использовать свою подписку? ✅: \n\n"
+            "- Coffee Moose | Мангилик ел 56 \nhttps://2gis.kz/astana/geo/70000001090408124\n\n"
+            "- Coffee Moose | Айнаколь 66\nhttps://2gis.kz/astana/geo/70000001094220075\n\n"
+            "- Coffee Original | Республика 27\nhttps://2gis.kz/astana/geo/70000001075322780\n\n"
+            "- EspressoDay | Назарбаев Университет (доступен только студентам НУ и персоналу НУ)\n"
+            "https://2gis.kz/astana/branches/70000001075103852/firm/70000001080140646/71.395796%2C51.090729?m=71.397718%2C51.092483%2F15.29\n\n"
+            "Пишите скорее нашему администратору @tratatapara, и мы позаботимся о вашем комфорте в каждой выпитой чашке кофе 🫶"
         )
     else:
         reply_message = (
@@ -200,6 +208,15 @@ async def display_subscription_status(message: types.Message):
         )
 
     await send_message_and_menu_buttons(message, reply_message, ["Оформить заказ"])
+
+
+async def send_message_and_menu_buttons(message, reply_message, buttons_names):
+    keyboard = [[KeyboardButton(text=name)] for name in buttons_names]
+    menu = ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+    # Ensure reply_message is treated as a string
+    reply_message_obj = await message.answer(reply_message, reply_markup=menu)
+    asyncio.create_task(delete_message_after_timeout(reply_message_obj, 4000))
+
 
 
 async def send_message_and_menu_buttons(message, reply_message, buttons_names):
