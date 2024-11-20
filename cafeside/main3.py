@@ -231,7 +231,7 @@ async def monitor_order_status():
 
                 # Формируем текст сообщения
                 message_text = (
-                    f"🔴 Заказ №{order_id} был отменён🔴\n"
+                    f"🔴 Заказ №{order_id} был отменён клиентом🔴\n"
                     f"Клиент: @{order['username']} \nНомер: {order['phone_number']}\n"
                     f"Напиток: {order['coffee_name']}\n"
                     f"Дата заказа: {order['order_date']}"
@@ -491,7 +491,7 @@ async def handle_cafe_cancel_order(callback_query: CallbackQuery):
         order_date = order_details.get("order_date", "Не указана")
         # Уведомление кафе
         await callback_query.message.edit_text(
-            f"🔴 Заказ #{order_details['order_id']} был отменён 🔴\n"
+            f"🔴 Заказ #{order_details['order_id']} был отменён кофейней🔴\n"
             f"Клиент: @{username}\n"
             f"Номер: {phone_number}\n"
             f"Напиток: {coffee_name}\n"

@@ -15,14 +15,13 @@ logger = logging.getLogger(__name__)
 # API Key and Database URL
 API_KEY = "8103008160:AAFlMNkjk84genN5awpUcUDIayEc3DJyHO0"
 DB_URL="postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
 astana_tz = timezone(timedelta(hours=5))
 users_row = None
 cafe_options = None
 coffee_options = None
-is_cafe_chosen = False
+is_cafe_chosen = False  
 is_coffee_chosen = False
 user_data = {}
 ### Database Helpers ###
@@ -168,11 +167,13 @@ async def check_user_subscription(telegram_id):
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
+    
 async def get_user_by_id(user_id):
     """Retrieve user information by user_id."""
     query = "SELECT * FROM users WHERE user_id = %s;"
     result = await db_execute(query, params=(user_id,), fetch=True)
     return result[0] if result else None
+
 async def get_user_latest_order(user_id):
     query = """
         SELECT o.order_id, o.status, o.otp_code, m.coffee_name
@@ -317,7 +318,7 @@ async def handle_order_request(message: types.Message):
         return
 
     # Проверка наличия номера телефона у пользователя
-    if not user["phone_number"]:  # Если номера телефона нет
+    if user["request_number"]:  # Если нужно спрашивать номер телефона
         # Запрашиваем номер телефона
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
@@ -354,8 +355,9 @@ async def handle_phone_number(message: types.Message):
     telegram_id = message.from_user.id
     phone_number = message.contact.phone_number
 
-    # Сохраняем номер телефона в базу данных
-    query = "UPDATE users SET phone_number = %s WHERE telegram_id = %s;"
+    query = "UPDATE users SET phone_number = %s, request_number = FALSE WHERE telegram_id = %s;"
+    
+
     await db_execute(query, params=(phone_number, str(telegram_id)))
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -373,30 +375,52 @@ async def handle_phone_number(message: types.Message):
 
 @dp.message(F.text == "❌ Отказаться")
 async def handle_decline_phone_request(message: types.Message):
+    telegram_id = message.from_user.id
+    print(telegram_id)  # Debugging: Ensure the ID is correct
+
+    # Define the keyboard
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(text="Оформить заказ")
             ]
         ],
-        resize_keyboard=True,  # Уменьшает размер кнопки
-        one_time_keyboard=False  # Скрывает клавиатуру после нажатия
+        resize_keyboard=True,  # Reduce button size
+        one_time_keyboard=False  # Keep the keyboard open
     )
-    """Обрабатываем отказ от предоставления номера телефона."""
-    otkaz=await message.answer("Вы отказались предоставить номер телефона 😔\n\n""Вы можете оформить заказ и без него ✅",reply_markup=keyboard)
-    asyncio.create_task(delete_message_after_timeout(otkaz, 4000)) 
 
+    # Correct database query
+    query = "UPDATE users SET request_number = FALSE WHERE telegram_id = %s;"
+    try:
+        # Pass the parameter as a tuple
+        await db_execute(query, params=(telegram_id,))  
+    except Exception as e:
+        # Handle database errors for debugging
+        logging.error(f"Database error: {e}")
+        await message.answer("Произошла ошибка при обновлении данных. Попробуйте позже.")
+        return
+
+    # Handle the user's decline to share their phone number
+    otkaz = await message.answer(
+        "Вы отказались предоставить номер телефона 😔\n\n"
+        "Вы можете оформить заказ и без него ✅",
+        reply_markup=keyboard
+    )
+    asyncio.create_task(delete_message_after_timeout(otkaz, 4000))
+
+    # Retrieve available cafe options
     cafe_options = await retrieve_cafe_options()
     if not cafe_options:
-        not_dostup_kafe=await message.answer("К сожалению, сейчас нет доступных кафе.")
-        asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000)) 
+        not_dostup_kafe = await message.answer("К сожалению, сейчас нет доступных кафе.")
+        asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000))
         return
 
     await show_cafe_selection(message)
 
 
-async def show_cafe_selection(message, page=0):
-    global cafe_options
+
+async def show_cafe_selection(message):
+    cafe_options = await retrieve_cafe_options()
     if not cafe_options:
         not_dostup_kafe=await message.answer("Нет доступных заведений.")
         asyncio.create_task(delete_message_after_timeout(not_dostup_kafe, 4000)) 
@@ -513,12 +537,12 @@ async def handle_coffee_selection(callback_query: types.CallbackQuery):
         # Запросить комментарий к заказу
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="С собой", callback_data="at_cafe")],
+                [InlineKeyboardButton(text="В кофейне", callback_data="at_cafe")],
                 [InlineKeyboardButton(text="На вынос", callback_data="take_out")]
             ]
         )
         chosed=await callback_query.message.edit_text(
-            f"Вы выбрали {selected_coffee['coffee_name']}✅\nКофе с собой или на вынос?\n",
+            f"Вы выбрали {selected_coffee['coffee_name']}✅\nКофе на вынос или в заведении?\n",
             reply_markup=keyboard
         )
         await callback_query.answer()
@@ -539,7 +563,7 @@ async def handle_at_cafe(callback_query: types.CallbackQuery):
         return
 
     # Сохранить выбор "В кафе" в user_data
-    order_data["take_out"] = "В кафе"
+    order_data["take_out"] = "В кофейне"
     user_data[telegram_id] = order_data
 
     # Предложить добавить комментарии
@@ -551,7 +575,7 @@ async def handle_at_cafe(callback_query: types.CallbackQuery):
     )
 
     await callback_query.message.edit_text(
-        "Вы выбрали: В кафе 🏠\n"
+        "Вы выбрали: В кофейне 🏠\n"
         "Хотите добавить комментарии к заказу? (например, добавить сироп, сахар и т.д.)",
         reply_markup=keyboard
     )
@@ -629,7 +653,7 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text(
             f"Ваш заказ #{order_id} успешно создан 🥳\n\n"
             f"Напиток: {order_details['coffee_name']}\n"
-            f"Контакты кафе: {order_details['cafe_tg']}\n"
+            f"Контакт кофейни для связи: {order_details['cafe_tg']}\n"
             f"{order_details['take_out']}\n\n"
             f"Ждем подтверждения от кофейни ⏰\n"
             f"Если хотите отменить заказ, подождите 3 секунды"
@@ -638,7 +662,7 @@ async def handle_add_comment_no(callback_query: types.CallbackQuery):
         cancel_message=await callback_query.message.edit_text(
             f"Ваш заказ #{order_id} успешно создан 🥳\n\n"
             f"Напиток: {order_details['coffee_name']}\n"
-            f"Контакты кафе: {order_details['cafe_tg']}\n"
+            f"Контакт кофейни для связи: {order_details['cafe_tg']}\n"
             f"{order_details['take_out']}\n\n"
             f"Ждем подтверждения от кофейни ⏰\n"
             f"Если хотите отменить, нажмите на кнопку снизу 🚫\n",
