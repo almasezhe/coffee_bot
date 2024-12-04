@@ -10,7 +10,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeybo
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import re
-
+from aiogram.exceptions import TelegramNetworkError
+import time
 from aiogram import Router, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
@@ -20,27 +21,45 @@ logger = logging.getLogger(__name__)
 # Load your API key and database URL
 API_KEY = "7537071518:AAE2fDi3HoOT4p8RNmptqzwwEOgXUDdhoZw"
 DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+#API_KEY = "5630308060:AAEXU8OHgxBeZ_AByL3mGAqVAJ079eidxAo"
+#DB_URL="postgresql://postgres.xerkmpqjygwvwzgiysep:23147513Faq@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
 # FSM States
 class MenuState(StatesGroup):
     waiting_for_new_item = State()
+bot = Bot(token=API_KEY, timeout=60)
 
-bot = Bot(token=API_KEY)
 dp = Dispatcher()
 
 router = Router()
 dp.include_router(router)
+@router.errors()
+async def handle_errors(update: types.Update, exception: Exception):
+    if isinstance(exception, TelegramNetworkError):
+        logger.warning(f"Проблема с сетью: {exception}. Повторная попытка через 5 секунд.")
+        await asyncio.sleep(5)
+        return True  # Пробуем снова
+    logger.error(f"Необработанная ошибка: {exception}")
+    return False
 
 async def db_execute(query, params=None, fetch=False):
     """Helper function to execute a query on the database."""
     global db_connection
-    if db_connection.closed:
-        db_connection = psycopg2.connect(DB_URL)
     try:
+        if db_connection.closed:
+            db_connection = psycopg2.connect(DB_URL)
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
             db_connection.commit()
             if fetch:
                 return cursor.fetchall() or []
+    except psycopg2.OperationalError as e:
+        logger.error(f"Ошибка подключения к базе данных: {e}")
+        try:
+            db_connection = psycopg2.connect(DB_URL)
+            logger.info("Подключение к базе данных восстановлено.")
+        except Exception as reconnect_error:
+            logger.error(f"Ошибка при восстановлении подключения: {reconnect_error}")
+            return None
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
@@ -189,7 +208,14 @@ async def handle_new_menu_item(message: types.Message, state: FSMContext):
 
 # Кэш для хранения текста сообщений
 message_cache = {}
-
+def clean_message_cache():
+    """Удаляет старые записи из кэша."""
+    current_time = time.time()
+    expiry_time = 3600  # Сообщения старше 1 часа удаляются
+    for message_id, (timestamp, _) in list(message_cache.items()):
+        if current_time - timestamp > expiry_time:
+            del message_cache[message_id]
+            logger.info(f"Сообщение с ID {message_id} удалено из кэша.")
 async def monitor_order_status():
     """Monitor the database for canceled orders and notify admins and cafes."""
     while True:
@@ -256,6 +282,8 @@ async def monitor_order_status():
                         )
                         # Обновляем кэш
                         message_cache[message_id] = message_text
+                        clean_message_cache()
+
 
                         # Обновляем статус уведомления в базе данных
                         update_query = """

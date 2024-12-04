@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters.command import Command
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup,KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -15,7 +16,10 @@ logger = logging.getLogger(__name__)
 # API Key and Database URL
 API_KEY = "8103008160:AAFlMNkjk84genN5awpUcUDIayEc3DJyHO0"
 DB_URL="postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-bot = Bot(token=API_KEY)
+#API_KEY = "2081123027:AAHxidAcDlJFxBLXbfCDELt9tTeWmk_H1vs"
+#DB_URL="postgresql://postgres.xerkmpqjygwvwzgiysep:23147513Faq@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+bot = Bot(token=API_KEY, timeout=60)
+
 dp = Dispatcher()
 astana_tz = timezone(timedelta(hours=5))
 users_row = None
@@ -27,18 +31,36 @@ user_data = {}
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
+    """Helper function to execute a query on the database."""
     global db_connection
-    if db_connection.closed:
-        db_connection = psycopg2.connect(DB_URL)
     try:
+        if db_connection.closed:
+            db_connection = psycopg2.connect(DB_URL)
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
             db_connection.commit()
-            if fetch:   
-                return cursor.fetchall()
+            if fetch:
+                return cursor.fetchall() or []
+    except psycopg2.OperationalError as e:
+        logger.error(f"Ошибка подключения к базе данных: {e}")
+        try:
+            db_connection = psycopg2.connect(DB_URL)
+            logger.info("Подключение к базе данных восстановлено.")
+        except Exception as reconnect_error:
+            logger.error(f"Ошибка при восстановлении подключения: {reconnect_error}")
+            return None
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
+
+@dp.errors()
+async def handle_errors(update: types.Update, exception: Exception):
+    if isinstance(exception, TelegramNetworkError):
+        logger.warning(f"Проблема с сетью: {exception}. Повторная попытка через 5 секунд.")
+        await asyncio.sleep(5)
+        return True  # Пробуем снова
+    logger.error(f"Необработанная ошибка: {exception}")
+    return False
 
 
 async def retrieve_cafe_schedule(cafe_id):
@@ -819,7 +841,7 @@ async def cancel_order(callback_query: types.CallbackQuery):
         # Если статус позволяет, отменяем заказ
         update_query = """
         UPDATE orders 
-        SET status = 'canceled'
+        SET status = 'canceled', is_finished = TRUE
         WHERE order_id = %s;
         """
 
