@@ -66,6 +66,18 @@ async def db_execute(query, params=None, fetch=False):
 
 
 ### MENU MANAGEMENT ###
+def clean_message_cache():
+    """Удаляет старые записи из кэша."""
+    current_time = time.time()
+    expiry_time = 3600  # Сообщения старше 1 часа удаляются
+    removed = 0  # Счетчик удаленных записей
+    
+    for message_id, (timestamp, _) in list(message_cache.items()):
+        if current_time - timestamp > expiry_time:
+            del message_cache[message_id]
+            removed += 1
+
+    logger.info(f"Очистка кэша завершена. Удалено {removed} записей.")
 
 async def get_menu():
     """Retrieve the menu for the current cafe."""
@@ -818,6 +830,12 @@ async def send_notification(chat_id, message_text):
         await bot.send_message(chat_id=chat_id, text=message_text)
     except Exception as e:
         logger.error(f"Error sending notification: {e}")
+async def clean_cache_periodically():
+    """Фоновая задача для очистки кэша каждые 15 минут."""
+    while True:
+        clean_message_cache()
+        logger.info("Кэш сообщений очищен.")
+        await asyncio.sleep(900)  # 900 секунд = 15 минут
 
 ### MAIN ###
 
@@ -828,6 +846,7 @@ async def main():
     asyncio.create_task(monitor_order_status())
     asyncio.create_task(auto_push_new_orders())
     logger.info("Бот для кафе запущен и готов к работе")
+    asyncio.create_task(clean_cache_periodically())  # 🔥 Запуск автоматической очистки кэша
 
     await dp.start_polling(bot)
     db_connection.close()
