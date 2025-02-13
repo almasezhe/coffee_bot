@@ -31,10 +31,9 @@ user_data = {}
 ### Database Helpers ###
 
 async def db_execute(query, params=None, fetch=False):
-    """Helper function to execute a query on the database."""
     global db_connection
     try:
-        if db_connection.closed:
+        if db_connection.closed:  # Если соединение разорвано, переподключаемся
             db_connection = psycopg2.connect(DB_URL)
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
@@ -52,6 +51,7 @@ async def db_execute(query, params=None, fetch=False):
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
+
 
 @dp.errors()
 async def handle_errors(update: types.Update, exception: Exception):
@@ -1069,13 +1069,20 @@ async def main():
     global db_connection
     db_connection = psycopg2.connect(DB_URL)
 
-    # Запуск мониторинга OTP-кодов
-    asyncio.create_task(monitor_otp_updates())
-    asyncio.create_task(monitor_subscription_updates())
+    tasks = [
+        asyncio.create_task(monitor_order_status()),
+        asyncio.create_task(monitor_otp_updates()),
+        asyncio.create_task(monitor_subscription_updates()),
+    ]
     logger.info("Бот запущен и готов к работе")
-    await dp.start_polling(bot)
 
-    db_connection.close()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        for task in tasks:
+            task.cancel()
+
+
 
 
 

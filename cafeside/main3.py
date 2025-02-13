@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeybo
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import re
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramNetworkError,TelegramBadRequest
 import time
 from aiogram import Router, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -42,10 +42,9 @@ async def handle_errors(update: types.Update, exception: Exception):
     return False
 
 async def db_execute(query, params=None, fetch=False):
-    """Helper function to execute a query on the database."""
     global db_connection
     try:
-        if db_connection.closed:
+        if db_connection.closed:  # Если соединение разорвано, переподключаемся
             db_connection = psycopg2.connect(DB_URL)
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
@@ -63,6 +62,7 @@ async def db_execute(query, params=None, fetch=False):
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
+
 
 
 ### MENU MANAGEMENT ###
@@ -229,7 +229,7 @@ def clean_message_cache():
             del message_cache[message_id]
             logger.info(f"Сообщение с ID {message_id} удалено из кэша.")
 async def monitor_order_status():
-    """Monitor the database for canceled orders and notify admins and cafes."""
+    """Мониторинг заказов и обновление их статусов в чате кафе."""
     while True:
         try:
             query = """
@@ -256,68 +256,52 @@ async def monitor_order_status():
             for order in canceled_orders:
                 order_id = order["order_id"]
                 message_id = order["message_id"]
-                is_finished = order["is_finished"]
 
-                # Если заказ завершен, удаляем его из кэша
-                if is_finished and message_id in message_cache:
-                    logger.info(f"Удаляем из кэша завершенный заказ message_id={message_id}.")
-                    del message_cache[message_id]
-                    continue  # Пропускаем обработку завершенного заказа
-
-                # Получаем ID чата кафе
-                cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
-
-                # Формируем текст сообщения
-                message_text = (
-                    f"🔴 Заказ №{order_id} был отменён клиентом🔴\n"
+                # Формируем новый текст сообщения
+                new_text = (
+                    f"🔴 Заказ №{order_id} был отменён клиентом 🔴\n"
                     f"Клиент: @{order['username']} \nНомер: {order['phone_number']}\n"
                     f"Напиток: {order['coffee_name']}\n"
                     f"Дата заказа: {order['order_date']}"
                 )
 
-                if cafe_chat_id and message_id:
-                    # Проверяем, есть ли сообщение в кэше и совпадает ли текст
-                    cached_text = message_cache.get(message_id)
-                    logger.info(f"Кэш для message_id={message_id}: {cached_text}")
-                    logger.info(f"Новый текст для message_id={message_id}: {message_text}")
+                # Получаем ID чата кафе
+                cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                    if cached_text == message_text:
-                        logger.info(f"Текст для message_id={message_id} не изменился, пропускаем редактирование.")
-                        continue  # Если текст совпадает, пропускаем редактирование
-                    
-                    # Выполняем редактирование сообщения
+                if cafe_chat_id and message_id:
+                    cached_text = message_cache.get(message_id)
+
+                    # 🔥 ПРОВЕРЯЕМ, ИЗМЕНИЛСЯ ЛИ ТЕКСТ ПЕРЕД ОБНОВЛЕНИЕМ
+                    if cached_text == new_text:
+                        logger.info(f"🔄 Сообщение message_id={message_id} не изменилось, пропускаем редактирование.")
+                        continue
+
+                    # Если текст изменился, обновляем сообщение
                     try:
                         await bot.edit_message_text(
                             chat_id=cafe_chat_id,
                             message_id=message_id,
-                            text=message_text,
+                            text=new_text
                         )
                         # Обновляем кэш
-                        message_cache[message_id] = message_text
+                        message_cache[message_id] = new_text
                         clean_message_cache()
 
-
-                        # Обновляем статус уведомления в базе данных
+                        # Обновляем статус уведомления в БД
                         update_query = """
                             UPDATE orders
                             SET cancel_notified = TRUE, is_finished = TRUE
                             WHERE order_id = %s;
                         """
                         await db_execute(update_query, params=(order_id,))
-                        logger.info(f"Сообщение message_id={message_id} успешно обновлено.")
-                    except Exception as edit_error:
-                        logger.error(f"Ошибка при редактировании сообщения message_id={message_id}: {edit_error}")
+                        logger.info(f"✅ Сообщение message_id={message_id} успешно обновлено.")
+                    except TelegramBadRequest as e:
+                        logger.error(f"❌ Ошибка при редактировании message_id={message_id}: {e}")
 
         except Exception as e:
-            logger.error(f"Ошибка в monitor_order_status: {e}")
+            logger.error(f"❌ Ошибка в monitor_order_status: {e}")
 
-        await asyncio.sleep(4)  # Ждем перед следующей проверкой
-
-
-
-
-
-
+        await asyncio.sleep(4)
 
 @router.callback_query(F.data.startswith("toggle_"))
 async def toggle_availability(callback_query: types.CallbackQuery):
@@ -745,12 +729,11 @@ async def confirm_order_issued(callback_query: types.CallbackQuery):
 
 
 async def auto_push_new_orders():
-    """Continuously check for new orders and notify the cafe."""
+    """Проверяет базу на новые заказы и отправляет уведомления в кафе."""
     already_notified = set()
 
     while True:
         try:
-            # Query to get pending orders
             query = """
                 SELECT o.order_id, u.username, m.coffee_name, o.cafe_id, o.status, o.details, u.phone_number, o.order_date, o.take_out
                 FROM orders o
@@ -760,22 +743,19 @@ async def auto_push_new_orders():
             """
             orders = await db_execute(query, fetch=True)
 
+            logger.info(f"🔄 Проверка новых заказов... (найдено: {len(orders)})")
+
             if not orders:
-                logger.info("Нет новых заказов для обработки.")
                 await asyncio.sleep(4)
                 continue
 
             for order in orders:
-                # Skip orders that are already notified
                 if order["order_id"] in already_notified:
                     continue
 
                 already_notified.add(order["order_id"])
-
-                # Retrieve chat_id and admin telegram_id
                 cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
 
-                # Formulate message text
                 message_text = (
                     f"🔵 Новый заказ #{order['order_id']}: 🔵\n"
                     f"Клиент: @{order['username']}\n"
@@ -785,29 +765,26 @@ async def auto_push_new_orders():
                     f"Комментарий: {order['details']}\n"
                 )
 
-                # Buttons for accepting or canceling the order
                 buttons = [
                     [InlineKeyboardButton(text="Принять", callback_data=f"accept^{order['order_id']}")],
                     [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_cafe^{order['order_id']}")],
                 ]
                 keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-                # Notify the cafe's chat
                 if cafe_chat_id:
-                    message = await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
-
-                    # Save the message_id for future updates
-                    update_query = """
-                        UPDATE orders
-                        SET message_id = %s
-                        WHERE order_id = %s;
-                    """
-                    await db_execute(update_query, params=(message.message_id, order["order_id"]))
+                    try:
+                        message = await bot.send_message(chat_id=cafe_chat_id, text=message_text, reply_markup=keyboard)
+                        update_query = "UPDATE orders SET message_id = %s WHERE order_id = %s;"
+                        await db_execute(update_query, params=(message.message_id, order["order_id"]))
+                        logger.info(f"📩 Уведомление отправлено для заказа {order['order_id']}.")
+                    except Exception as send_error:
+                        logger.error(f"❌ Ошибка отправки сообщения: {send_error}")
 
         except Exception as e:
-            logger.error(f"Error in monitor_pending_orders: {e}")
+            logger.error(f"❌ Ошибка в `auto_push_new_orders()`: {e}")
+            await asyncio.sleep(10)
 
-        await asyncio.sleep(4)  # Wait before checking for new orders again
+        await asyncio.sleep(4)
 
 
 async def get_admin_contact(cafe_id):
@@ -838,18 +815,25 @@ async def clean_cache_periodically():
         await asyncio.sleep(900)  # 900 секунд = 15 минут
 
 ### MAIN ###
-
 async def main():
     global db_connection
     db_connection = psycopg2.connect(DB_URL)
 
-    asyncio.create_task(monitor_order_status())
-    asyncio.create_task(auto_push_new_orders())
-    logger.info("Бот для кафе запущен и готов к работе")
-    asyncio.create_task(clean_cache_periodically())  # 🔥 Запуск автоматической очистки кэша
+    tasks = [
+        asyncio.create_task(monitor_order_status()),
+        asyncio.create_task(clean_cache_periodically()),
+        asyncio.create_task(auto_push_new_orders()),
+    ]
+    logger.info("Бот запущен и готов к работе")
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        for task in tasks:
+            task.cancel()
+
 
     await dp.start_polling(bot)
-    db_connection.close()
 
 
 if __name__ == "__main__":
