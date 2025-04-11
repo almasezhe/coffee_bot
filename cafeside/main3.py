@@ -44,23 +44,20 @@ async def handle_errors(update: types.Update, exception: Exception):
 async def db_execute(query, params=None, fetch=False):
     global db_connection
     try:
-        if db_connection.closed:  # Если соединение разорвано, переподключаемся
+        if db_connection.closed:
             db_connection = psycopg2.connect(DB_URL)
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
-            db_connection.commit()
+            db_connection.commit()  # Фиксируем изменения
             if fetch:
                 return cursor.fetchall() or []
     except psycopg2.OperationalError as e:
-        logger.error(f"Ошибка подключения к базе данных: {e}")
-        try:
-            db_connection = psycopg2.connect(DB_URL)
-            logger.info("Подключение к базе данных восстановлено.")
-        except Exception as reconnect_error:
-            logger.error(f"Ошибка при восстановлении подключения: {reconnect_error}")
-            return None
+        logger.error(f"Ошибка подключения: {e}")
+        db_connection.rollback()  # Откат при ошибке
+        return None
     except Exception as e:
-        logger.error(f"Database error: {e}")
+        logger.error(f"Ошибка запроса: {e}")
+        db_connection.rollback()  # Откат при ошибке
         return None
 
 
@@ -254,10 +251,13 @@ async def monitor_order_status():
                     JOIN users u ON o.user_id = u.user_id
                     WHERE o.status = 'canceled' 
                         AND o.cancel_notified = FALSE 
-                        AND o.is_finished = FALSE;  # Исключаем завершённые заказы
+                        AND o.is_finished = FALSE;
                 """
                 canceled_orders = await db_execute(query, fetch=True)
-
+                if not canceled_orders:
+                    logger.info("Нет отменённых заказов для обработки")
+                    await asyncio.sleep(5)
+                    continue
                 for order in canceled_orders:
                     order_id = order["order_id"]
                     message_id = order["message_id"]
@@ -451,9 +451,11 @@ async def update_order_status(order_id, status):
     
     try:
         await db_execute(query_update_status, params=(status, order_id))
+        db_connection.commit()
         return True
     except Exception as e:
         logger.error(f"Ошибка при обновлении статуса заказа #{order_id}: {e}")
+        db_connection.rollback()
         return False
 
 
@@ -764,7 +766,10 @@ async def auto_push_new_orders():
                 WHERE o.status = 'pending';
             """
             orders = await db_execute(query, fetch=True)
-
+            if orders is None:
+                logger.error("Ошибка получения заказов")
+                await asyncio.sleep(10)
+                continue
             logger.info(f"🔄 Проверка новых заказов... (найдено: {len(orders)})")
 
             if not orders:
