@@ -1077,7 +1077,6 @@ async def main():
     db_connection = psycopg2.connect(DB_URL)
 
     tasks = [
-        asyncio.create_task(monitor_order_status()),
         asyncio.create_task(monitor_otp_updates()),
         asyncio.create_task(monitor_subscription_updates()),
     ]
