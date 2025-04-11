@@ -863,23 +863,30 @@ async def cancel_order(callback_query: types.CallbackQuery):
 
 
 
-async def monitor_order_status(telegram_id):
-    """Monitor the status of an order and notify the user."""
+async def monitor_order_status():
+    """Мониторинг статусов всех заказов."""
     try:
         query = """
-            SELECT o.order_id, o.status, o.otp_code, m.coffee_name
+            SELECT 
+                o.order_id, 
+                o.status, 
+                o.otp_code, 
+                m.coffee_name,
+                u.telegram_id  # Добавляем получение telegram_id
             FROM orders o
             JOIN menu m ON o.menu_id = m.menu_id
             JOIN users u ON o.user_id = u.user_id
-            WHERE u.telegram_id = %s
-            ORDER BY o.order_date DESC
-            LIMIT 1;
+            WHERE o.status NOT IN ('выдан', 'canceled');
         """
-        order = await db_execute(query, params=(str(telegram_id),), fetch=True)  # Cast telegram_id to string
+        orders = await db_execute(query, fetch=True)
 
-        if not order:
-            logger.error(f"No recent orders found for telegram_id={telegram_id}")
+        if not orders:
+            logger.info("Нет активных заказов для отслеживания.")
             return
+        for order in orders:
+           order_id = order["order_id"]
+           last_status = order["status"]
+           telegram_id = order["telegram_id"]  
 
         order_id, last_status = order[0]["order_id"], order[0]["status"]
 
