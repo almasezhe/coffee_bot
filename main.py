@@ -33,23 +33,30 @@ user_data = {}
 async def db_execute(query, params=None, fetch=False):
     global db_connection
     try:
-        if db_connection.closed:  # Если соединение разорвано, переподключаемся
+        if db_connection.closed:
             db_connection = psycopg2.connect(DB_URL)
+        
         with db_connection.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(query, params)
-            db_connection.commit()
             if fetch:
-                return cursor.fetchall() or []
+                result = cursor.fetchall() or []
+            db_connection.commit()
+            return result if fetch else None
+
     except psycopg2.OperationalError as e:
-        logger.error(f"Ошибка подключения к базе данных: {e}")
+        logger.error(f"Database connection error: {e}")
         try:
-            db_connection = psycopg2.connect(DB_URL)
-            logger.info("Подключение к базе данных восстановлено.")
+            db_connection.rollback()  # Clear aborted state
+            db_connection = psycopg2.connect(DB_URL)  # Reconnect
+            logger.info("Reconnected to database.")
         except Exception as reconnect_error:
-            logger.error(f"Ошибка при восстановлении подключения: {reconnect_error}")
+            logger.error(f"Reconnection failed: {reconnect_error}")
             return None
+        return await db_execute(query, params, fetch)  # Retry query
+
     except Exception as e:
         logger.error(f"Database error: {e}")
+        db_connection.rollback()  # Reset connection after errors
         return None
 
 
