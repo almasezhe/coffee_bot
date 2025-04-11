@@ -228,81 +228,103 @@ def clean_message_cache():
         if current_time - timestamp > expiry_time:
             del message_cache[message_id]
             logger.info(f"Сообщение с ID {message_id} удалено из кэша.")
+message_cache_lock = asyncio.Lock()  # Добавляем блокировку
+
 async def monitor_order_status():
     """Мониторинг заказов и обновление их статусов в чате кафе."""
     while True:
         try:
-            query = """
-                SELECT 
-                    o.order_id, 
-                    o.user_id, 
-                    o.menu_id, 
-                    o.order_date, 
-                    o.status, 
-                    o.cancel_notified, 
-                    o.message_id, 
-                    m.coffee_name, 
-                    u.username, 
-                    u.phone_number, 
-                    o.cafe_id,
-                    o.is_finished
-                FROM orders o
-                JOIN menu m ON o.menu_id = m.menu_id
-                JOIN users u ON o.user_id = u.user_id
-                WHERE o.status = 'canceled' AND o.cancel_notified = FALSE;
-            """
-            canceled_orders = await db_execute(query, fetch=True)
+            async with message_cache_lock:  # Синхронизируем доступ к кэшу
+                query = """
+                    SELECT 
+                        o.order_id, 
+                        o.user_id, 
+                        o.menu_id, 
+                        o.order_date, 
+                        o.status, 
+                        o.cancel_notified, 
+                        o.message_id, 
+                        m.coffee_name, 
+                        u.username, 
+                        u.phone_number, 
+                        o.cafe_id,
+                        o.is_finished
+                    FROM orders o
+                    JOIN menu m ON o.menu_id = m.menu_id
+                    JOIN users u ON o.user_id = u.user_id
+                    WHERE o.status = 'canceled' 
+                        AND o.cancel_notified = FALSE 
+                        AND o.is_finished = FALSE;  # Исключаем завершённые заказы
+                """
+                canceled_orders = await db_execute(query, fetch=True)
 
-            for order in canceled_orders:
-                order_id = order["order_id"]
-                message_id = order["message_id"]
+                for order in canceled_orders:
+                    order_id = order["order_id"]
+                    message_id = order["message_id"]
+                    cafe_id = order["cafe_id"]
 
-                # Формируем новый текст сообщения
-                new_text = (
-                    f"🔴 Заказ №{order_id} был отменён клиентом 🔴\n"
-                    f"Клиент: @{order['username']} \nНомер: {order['phone_number']}\n"
-                    f"Напиток: {order['coffee_name']}\n"
-                    f"Дата заказа: {order['order_date']}"
-                )
+                    # Формируем новый текст сообщения
+                    new_text = (
+                        f"🔴 Заказ №{order_id} был отменён клиентом 🔴\n"
+                        f"Клиент: @{order['username']}\n"
+                        f"Номер: {order['phone_number']}\n"
+                        f"Напиток: {order['coffee_name']}\n"
+                        f"Дата заказа: {order['order_date']}"
+                    )
 
-                # Получаем ID чата кафе
-                cafe_chat_id = await get_cafe_chat_id(order["cafe_id"])
+                    # Получаем ID чата кафе
+                    cafe_chat_id = await get_cafe_chat_id(cafe_id)
 
-                if cafe_chat_id and message_id:
-                    cached_text = message_cache.get(message_id)
-
-                    # 🔥 ПРОВЕРЯЕМ, ИЗМЕНИЛСЯ ЛИ ТЕКСТ ПЕРЕД ОБНОВЛЕНИЕМ
-                    if cached_text == new_text:
-                        logger.info(f"🔄 Сообщение message_id={message_id} не изменилось, пропускаем редактирование.")
+                    if not cafe_chat_id or not message_id:
                         continue
 
-                    # Если текст изменился, обновляем сообщение
+                    # Проверяем хэш сообщения
+                    current_hash = hash(message_cache.get(message_id, ''))
+                    new_hash = hash(new_text)
+                    
+                    logger.info(
+                        f"Hash check for message_id={message_id}: "
+                        f"cached={current_hash}, new={new_hash}"
+                    )
+
+                    if current_hash == new_hash:
+                        logger.info(f"Сообщение {message_id} не изменилось (hash match)")
+                        continue
+
                     try:
+                        # Пытаемся обновить сообщение
                         await bot.edit_message_text(
                             chat_id=cafe_chat_id,
                             message_id=message_id,
                             text=new_text
                         )
-                        # Обновляем кэш
+                        
+                        # Обновляем кэш ПОСЛЕ успешного редактирования
                         message_cache[message_id] = new_text
-                        clean_message_cache()
+                        logger.info(f"Сообщение {message_id} успешно обновлено")
 
-                        # Обновляем статус уведомления в БД
+                        # Атомарно обновляем статус в БД
                         update_query = """
                             UPDATE orders
-                            SET cancel_notified = TRUE, is_finished = TRUE
+                            SET cancel_notified = TRUE, 
+                                is_finished = TRUE
                             WHERE order_id = %s;
                         """
                         await db_execute(update_query, params=(order_id,))
-                        logger.info(f"✅ Сообщение message_id={message_id} успешно обновлено.")
+
                     except TelegramBadRequest as e:
-                        logger.error(f"❌ Ошибка при редактировании message_id={message_id}: {e}")
+                        if "message is not modified" in str(e):
+                            logger.info(f"Сообщение {message_id} уже актуально")
+                            message_cache[message_id] = new_text  # Обновляем кэш при false-positive
+                        else:
+                            logger.error(f"Ошибка редактирования {message_id}: {e}")
+                    except Exception as e:
+                        logger.error(f"Критическая ошибка: {e}")
 
         except Exception as e:
-            logger.error(f"❌ Ошибка в monitor_order_status: {e}")
-
-        await asyncio.sleep(4)
-
+            logger.error(f"Ошибка в monitor_order_status: {e}")
+        
+        await asyncio.sleep(5)  # Увеличиваем интервал для снижения нагрузки
 @router.callback_query(F.data.startswith("toggle_"))
 async def toggle_availability(callback_query: types.CallbackQuery):
     """Toggle the availability of a menu item."""
