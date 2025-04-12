@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # API Key and Database URL
-API_KEY = "7696239640:AAElC7D2Hi0slgJg6CkJFSgCILUG5hWWXBE"
+API_KEY = "7696239640:AAHgrwzHYacGqaYBoXzHKXu17Y7qk07MWI8"
 DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
 bot = Bot(token=API_KEY)
 dp = Dispatcher()
