@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load your API key and database URL
-API_KEY = "7537071518:AAE2fDi3HoOT4p8RNmptqzwwEOgXUDdhoZw"
+API_KEY = "7537071518:AAH_oaw1UQ64fcaxfT6IaGVwhqgmPNNmUkk"
 DB_URL = "postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
 #API_KEY = "5630308060:AAEXU8OHgxBeZ_AByL3mGAqVAJ079eidxAo"
 #DB_URL="postgresql://postgres.xerkmpqjygwvwzgiysep:23147513Faq@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
