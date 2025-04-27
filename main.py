@@ -13,11 +13,6 @@ import aiogram
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-# API Key and Database URL
-API_KEY = "8103008160:AAGjHTbrqNVo9Rywbr45m0IqEXv9s8ctlXM"
-DB_URL="postgresql://postgres.jmujxtsvrbhlvthkkbiq:dbanMcmX9oxJyQlE@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
-#API_KEY = "2081123027:AAHxidAcDlJFxBLXbfCDELt9tTeWmk_H1vs"
-#DB_URL="postgresql://postgres.xerkmpqjygwvwzgiysep:23147513Faq@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
 bot = Bot(token=API_KEY, timeout=60)
 
 dp = Dispatcher()
